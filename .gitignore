@@ -1,0 +1,27 @@
+# ---- Rust 构建产物 ----
+/target/
+**/*.rs.bk
+*.pdb
+
+# ---- 本地编译的二进制（发布请走 Releases，二进制不入库）----
+# 注意：文件仍保留在本机，只是不纳入 git；若确实想随仓库分发，删掉这几行。
+/tvhelper
+/tvhelper.exe
+/tvx.exe
+
+# ---- 本地运行数据：含账号登录态 / 授权回调，绝不入库 ----
+/.tvx/
+*.log
+auth.log
+login-target
+
+# ---- 编辑器 / 操作系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---- 临时文件 ----
+/tmp/
