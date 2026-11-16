@@ -50,6 +50,9 @@ pub struct S {
     pub copy_bad_hint: &'static str,
     pub copy_unverified: &'static str,
     pub copy_unverified_hint: &'static str,
+    pub copy_newer: &'static str,
+    pub copy_newer_hint: &'static str,
+    pub btn_rebuild: &'static str,
     pub features: &'static str,
     pub cb_ads: &'static str,
     pub cb_ads_hint: &'static str,
@@ -59,11 +62,12 @@ pub struct S {
     pub cb_study_hint: &'static str,
     pub cb_silence: &'static str,
     pub cb_silence_hint: &'static str,
-    pub cb_auth: &'static str,
-    pub cb_auth_hint: &'static str,
+    pub cb_recover: &'static str,
+    pub cb_recover_hint: &'static str,
     pub cb_noupdate: &'static str,
     pub cb_noupdate_hint: &'static str,
     pub usage: &'static str,
+    pub usage_note: &'static str,
     pub tray_show: &'static str,
     pub tray_quit: &'static str,
     pub launching: &'static str,
@@ -95,6 +99,8 @@ pub struct S {
     pub empty_s3: &'static str,
     pub online: &'static str,
     pub offline: &'static str,
+    pub acct_bound: &'static str,
+    pub acct_dup: &'static str,
     pub delete: &'static str,
     pub dir: &'static str,
     pub stop: &'static str,
@@ -120,6 +126,9 @@ static ZH: S = S {
     copy_bad_hint: "点右侧「生成 / 更新副本」修复",
     copy_unverified: "● 副本 {v} · 未验证（锚点按 {refv} 校验）",
     copy_unverified_hint: "补丁锚点是字面代码串，压缩标识符随版本漂移；失配时构建会显式报错，不会打一半",
+    copy_newer: "· 发现新版本 {v}",
+    copy_newer_hint: "系统里的 TradingView 已升到 {v}，副本仍停在当前版本。建议按新版本重建副本——新版本的 JS 结构可能已变，补丁锚点会失配",
+    btn_rebuild: "重建副本",
     features: "功能",
     cb_ads: "拦截广告/追踪网络",
     cb_ads_hint: "网络层拦掉广告与追踪域名",
@@ -129,11 +138,12 @@ static ZH: S = S {
     cb_study_hint: "客户端 gate：子指标上限 free 档 1，注入后放大",
     cb_silence: "屏蔽充值窗口",
     cb_silence_hint: "不再弹出充值窗口",
-    cb_auth: "登录回调直达",
-    cb_auth_hint: "把当前账号的配置目录写进 tradingview:// 注册；否则浏览器授权回来会被别的实例丢掉",
+    cb_recover: "断线自动恢复",
+    cb_recover_hint: "检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复，4 秒未恢复就重载页面，之后按 15 秒 / 1 分钟 / 5 分钟再试（最多 4 次，仍失败就保留弹窗）；连续 1 分钟无弹窗则重新计数。只做恢复，不改变服务端并发配额",
     cb_noupdate: "禁用自动更新",
     cb_noupdate_hint: "去掉启动时的更新检查，手动检查不受影响",
     usage: "使用说明",
+    usage_note: "每个账号请登录不同的 TradingView 账号——同一账号多开会被服务端限制，表现为行情停止更新",
     tray_show: "显示主窗口",
     tray_quit: "退出",
     launching: "启动中… {s}s",
@@ -163,6 +173,8 @@ static ZH: S = S {
     empty_s3: "在弹出的 TradingView 窗口里登录。要双开就再添加一个账号",
     online: "在线 · PID {pid}",
     offline: "未启动",
+    acct_bound: "· 账号 {uid}",
+    acct_dup: "⚠ 与「{name}」同账号",
     delete: "删除",
     dir: "目录",
     stop: "停止",
@@ -188,6 +200,9 @@ static EN: S = S {
     copy_bad_hint: "Click \"Build / Update copy\" to repair",
     copy_unverified: "● Copy {v} · unverified (anchors checked against {refv})",
     copy_unverified_hint: "Patch anchors are literal code strings; minified identifiers drift between versions. On mismatch the build fails loudly instead of half-applying",
+    copy_newer: "· newer {v} found",
+    copy_newer_hint: "The installed TradingView is now {v} but the managed copy is still on the old version. Rebuild the copy - the JS structure may have changed and the anchors will miss",
+    btn_rebuild: "Rebuild copy",
     features: "Features",
     cb_ads: "Block ads & trackers",
     cb_ads_hint: "Cancel ad/tracking domains at the network layer",
@@ -197,11 +212,12 @@ static EN: S = S {
     cb_study_hint: "Client-side gate: free tier child limit 1; the injection raises it",
     cb_silence: "Block billing popups",
     cb_silence_hint: "Hide billing popups",
-    cb_auth: "Route auth callback",
-    cb_auth_hint: "Register tradingview:// with this account's data dir; otherwise the browser callback is dropped by another instance",
+    cb_recover: "Auto-recover on disconnect",
+    cb_recover_hint: "When the site shows a \"connection closed\" / \"restore connection\" dialog, click restore; reload the page if still down after 4s, then retry after 15s / 1min / 5min (max 4 tries, dialog is kept if all fail). The counter resets after 1 minute without a dialog. Recovery only — it cannot raise the server-side connection quota",
     cb_noupdate: "Disable auto-update",
     cb_noupdate_hint: "Skip the update check at startup; manual check still works",
     usage: "How to use",
+    usage_note: "Sign in with a different TradingView account per profile — using one account in several instances hits the server limit and feeds stop updating",
     tray_show: "Show window",
     tray_quit: "Quit",
     launching: "Starting… {s}s",
@@ -231,6 +247,8 @@ static EN: S = S {
     empty_s3: "Sign in inside the TradingView window. Add another account for a second instance.",
     online: "Online · PID {pid}",
     offline: "Not running",
+    acct_bound: "· account {uid}",
+    acct_dup: "⚠ same account as \"{name}\"",
     delete: "Delete",
     dir: "Folder",
     stop: "Stop",
@@ -364,6 +382,31 @@ impl Lang {
         )
     }
 
+    /// 按新版本重建副本：开始 / 完成
+    pub fn log_rebuild_start(&self, v: &str) -> String {
+        self.pick(
+            format!("按 {v} 重建副本（复制 → 解包 → 打补丁，约需几十秒）…"),
+            format!("Rebuilding the copy from {v} (copy → unpack → patch, may take a while)…"),
+        )
+    }
+
+    pub fn log_rebuilt(&self, v: &str, old: &str) -> String {
+        self.pick(
+            format!("副本已切换到 {v}；旧版本目录 apps/{old} 未删除，可手动清理"),
+            format!("Copy switched to {v}; the old apps/{old} directory was left in place and can be removed manually"),
+        )
+    }
+
+    /// 启动时自动把托管副本升级到当前补丁集
+    pub fn log_patch_upgraded(&self) -> String {
+        self.pick(
+            "托管副本的补丁已升级到当前版本（断线弹窗改为自动恢复）；正在运行的实例重启后生效"
+                .into(),
+            "Managed copy upgraded to the current patch set (disconnect dialogs now auto-recover); running instances take effect after restart"
+                .into(),
+        )
+    }
+
     pub fn log_no_copy_headless(&self) -> String {
         self.pick(
             "没有托管副本，先在界面里生成".into(),
@@ -415,6 +458,50 @@ impl Lang {
         self.pick(
             format!("账号「{name}」已存在"),
             format!("Account \"{name}\" already exists"),
+        )
+    }
+
+    /// 同账号双开被拒绝时的说明（不是配额不够，是"撞配额"）
+    pub fn dup_account(&self, uid: &str, other: &str) -> String {
+        self.pick(
+            format!(
+                "「{other}」在线且登录的是同一个 TradingView 账号（{uid}）。\
+                 同一账号只能开一个实例：请换一个账号登录，或先停掉「{other}」"
+            ),
+            format!(
+                "\"{other}\" is already online with the same TradingView account ({uid}). \
+                 One account = one instance: sign in with a different account, or stop \"{other}\" first"
+            ),
+        )
+    }
+
+    /// 启动后认出这个档案登录的是哪个账号
+    pub fn log_account_bound(&self, name: &str, uid: &str) -> String {
+        self.pick(
+            format!("「{name}」登录的是 TradingView 账号 {uid}"),
+            format!("\"{name}\" is signed in as TradingView account {uid}"),
+        )
+    }
+
+    /// 启动后认出同账号还有一个实例在跑
+    pub fn log_account_same(&self, name: &str, other: &str, uid: &str) -> String {
+        self.pick(
+            format!(
+                "⚠ 「{name}」和「{other}」是同一个账号（{uid}）：同一账号多开会被服务端限制，\
+                 表现为某个窗口行情停止更新；建议一个账号只留一个档案"
+            ),
+            format!(
+                "⚠ \"{name}\" and \"{other}\" share the same account ({uid}): running one account \
+                 in two instances hits the server limit and feeds stop updating; keep one profile per account"
+            ),
+        )
+    }
+
+    /// 全部启动时的错峰提示
+    pub fn log_stagger(&self, n: usize, secs: u64) -> String {
+        self.pick(
+            format!("全部启动：{n} 个账号，按 {secs} 秒间隔错峰启动（避免瞬间建连风暴）"),
+            format!("Launching {n} account(s) staggered by {secs}s (avoid a connection burst)"),
         )
     }
 

@@ -215,6 +215,9 @@ const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4c, 0x8d, 0xf6);
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
+/// 「全部启动」时相邻实例的间隔（秒）
+const STAGGER_SECS: u64 = 3;
+
 #[derive(Default)]
 struct Shared {
     log: Vec<String>,
@@ -237,56 +240,86 @@ struct Scan {
     log: Vec<String>,
 }
 
-/// 监听各账号日志里最新的 `TVX_AUTH_URL`，用**无痕窗口**打开（避开旧账号会话）。
-/// 只在新 URL 出现时打开一次，避免每轮扫描都弹窗。
-fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<String> {
-    let root = install::tvx_root();
-    let last_file = root.join("auth-last");
-    let last = std::fs::read_to_string(&last_file).unwrap_or_default();
+/// 已处理过的登录页 URL，**按档案各记一条**（`~/.tvx/auth-seen.json`）。
+///
+/// 不能用"全局只存一个 URL"来去重：多个账号的登录 URL 里 `key=` 必然不同，
+/// 单值基准会被另一个账号立刻顶掉 → 每轮扫描都判定"发现新 URL" → 反复打开
+/// 登录页并叠加后台接管进程。这是真实踩过的死循环（一直闪命令行窗口）。
+fn auth_seen_path() -> std::path::PathBuf {
+    install::tvx_root().join("auth-seen.json")
+}
 
-    let mut newest: Option<String> = None;
-    for p in profiles::list() {
-        let log = p.dir.join("tvx-launch.log");
-        let Ok(text) = std::fs::read_to_string(&log) else {
+/// 从各档案的最新登录 URL 里挑出"这个档案还没处理过"的一条，并把它记进 `seen`。
+///
+/// 关键是**按档案分别记**：多个账号的 URL 里 `key=` 不同，如果只维护一个全局值，
+/// 两个账号会互相把对方顶成"新 URL"，于是每轮扫描都触发一次打开登录页 +
+/// 启动接管线程——就是那个"命令行窗口一直闪"的死循环。
+fn pick_unseen_url(
+    seen: &mut std::collections::BTreeMap<String, String>,
+    items: impl Iterator<Item = (String, String)>,
+) -> Option<(String, String)> {
+    let mut newest = None;
+    for (name, url) in items {
+        if seen.get(&name).map(|s| s.as_str()) == Some(url.as_str()) {
             continue;
-        };
-        if let Some(line) = text.lines().rev().find(|l| l.contains("TVX_AUTH_URL ")) {
-            if let Some(url) = line.split("TVX_AUTH_URL ").nth(1) {
-                let url = url.trim().to_string();
-                if url.starts_with("http") && Some(&url) != Some(&last.trim().to_string()) {
-                    newest = Some(url);
-                }
-            }
+        }
+        seen.insert(name.clone(), url.clone());
+        newest = Some((name, url));
+    }
+    newest
+}
+
+/// 监听各账号日志里最新的 `TVX_AUTH_URL`，用**无痕窗口**打开（避开旧账号会话）。
+/// 每个档案只对"自己没处理过"的 URL 触发一次。
+fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<String> {
+    use std::collections::BTreeMap;
+
+    let seen_file = auth_seen_path();
+    let mut seen: BTreeMap<String, String> = std::fs::read_to_string(&seen_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let before = seen.len();
+    let newest = pick_unseen_url(
+        &mut seen,
+        profiles::list().into_iter().filter_map(|p| {
+            let text = std::fs::read_to_string(p.dir.join("tvx-launch.log")).ok()?;
+            let line = text.lines().rev().find(|l| l.contains("TVX_AUTH_URL "))?;
+            let url = line.split("TVX_AUTH_URL ").nth(1)?.trim().to_string();
+            url.starts_with("http").then_some((p.name, url))
+        }),
+    );
+    let changed = seen.len() != before;
+    if changed {
+        let _ = std::fs::create_dir_all(install::tvx_root());
+        if let Ok(s) = serde_json::to_string_pretty(&seen) {
+            let _ = std::fs::write(&seen_file, s);
         }
     }
 
-    if let Some(url) = &newest {
-        // 先试"应用内标签页"：登录页在应用里渲染，cookie 直接落进该账号目录，
-        // 不需要浏览器、也不需要 tradingview:// 回调（浏览器常把回调拦掉）。
-        let opened_in_app = profiles::list()
-            .iter()
-            .find(|p| {
-                std::fs::read_to_string(p.dir.join("tvx-launch.log"))
-                    .map(|t| t.contains(url))
-                    .unwrap_or(false)
-            })
-            .map(|p| profiles::open_in_app_tab(p, url).is_ok())
-            .unwrap_or(false);
+    let (pname, url) = newest?;
+    let url = url.as_str();
 
-        let _ = std::fs::write(&last_file, url);
-        // 同时盯住被商店版抢走的回调（token 卡在那个进程的命令行里）
-        if let Some(c) = ctx {
-            profiles::spawn_handoff_watcher(c.clone());
-        }
-        return Some(if opened_in_app {
-            "已在应用内标签页打开登录页（不需要外部浏览器）".to_string()
-        } else if crate::browser::open_private(url) {
-            "已在无痕窗口打开登录页（不受你浏览器里已有账号影响）".to_string()
-        } else {
-            "已用默认浏览器打开登录页（未找到 Chrome/Edge）".to_string()
-        });
+    // 先试"应用内标签页"：登录页在应用里渲染，cookie 直接落进该账号目录，
+    // 不需要浏览器、也不需要 tradingview:// 回调（浏览器常把回调拦掉）。
+    let opened_in_app = profiles::list()
+        .into_iter()
+        .find(|p| p.name == pname)
+        .map(|p| profiles::open_in_app_tab(&p, url).is_ok())
+        .unwrap_or(false);
+
+    // 同时盯住被商店版抢走的回调（token 卡在那个进程的命令行里）
+    if let Some(c) = ctx {
+        profiles::spawn_handoff_watcher(c.clone());
     }
-    None
+    Some(if opened_in_app {
+        "已在应用内标签页打开登录页（不需要外部浏览器）".to_string()
+    } else if crate::browser::open_private(url) {
+        "已在无痕窗口打开登录页（不受你浏览器里已有账号影响）".to_string()
+    } else {
+        "已用默认浏览器打开登录页（未找到 Chrome/Edge）".to_string()
+    })
 }
 
 fn scan_now(ctx: Option<&egui::Context>) -> Scan {
@@ -375,6 +408,8 @@ enum Act {
     Delete(String),
     SubmitAdd,
     ReapplyPatches,
+    /// 按指定的安装重建托管副本（客户端升级后副本还停在旧版本时用）
+    RebuildCopy(usize),
 }
 
 pub struct App {
@@ -405,6 +440,8 @@ pub struct App {
     quitting: bool,
     /// 已点「启动」但还没被扫描到存活的账号（显示"启动中"）
     launching: HashMap<String, Instant>,
+    /// 启动时只检查一次"托管副本的补丁是否需要升级"
+    patch_checked: bool,
 }
 
 impl App {
@@ -428,6 +465,7 @@ impl App {
             tray_attempts: 0,
             quitting: false,
             launching: HashMap::new(),
+            patch_checked: false,
         };
         me.reload();
         if me.profiles.is_empty() {
@@ -508,7 +546,10 @@ impl App {
                 };
                 let dest = install::dest_for(&inst);
                 match install::build(&inst, &dest, &flags, lang, &mut push) {
-                    Ok(m) => push(lang.log_built(&m.dir.display().to_string())),
+                    Ok(m) => {
+                        install::set_active_app(&m.version);
+                        push(lang.log_built(&m.dir.display().to_string()))
+                    }
                     Err(e) => {
                         let msg = lang.log_create_failed(&format!("{e:#}"));
                         let mut s = shared.lock().unwrap();
@@ -554,10 +595,29 @@ impl App {
                     return;
                 };
                 if let Some(p) = self.profiles.iter().find(|p| p.name == name).cloned() {
-                    match profiles::launch(&m, &p) {
+                    match profiles::launch(&m, &p, lang) {
                         Ok(pid) => {
                             self.launching.insert(p.name.clone(), Instant::now());
-                            self.log(lang.log_launched(&p.name, pid))
+                            self.log(lang.log_launched(&p.name, pid));
+                            // 约 10 秒后（页面已把登录态落盘）回填账号：
+                            // 本功能之前创建的档案没有绑定记录，只能这样认一次。
+                            let p2 = p.clone();
+                            let sh = self.shared.clone();
+                            let c2 = ctx.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_secs(10));
+                                if let Some((uid, dup)) = profiles::refresh_account(&p2) {
+                                    if let Ok(mut st) = sh.lock() {
+                                        st.log.push(lang.log_account_bound(&p2.name, &uid));
+                                        if let Some(other) = dup {
+                                            st.log.push(lang.log_account_same(
+                                                &p2.name, &other, &uid,
+                                            ));
+                                        }
+                                    }
+                                    c2.request_repaint();
+                                }
+                            });
                         }
                         Err(e) => self.log(lang.log_launch_failed(&format!("{e:#}"))),
                     }
@@ -578,18 +638,52 @@ impl App {
                 let Some(m) = self.managed.clone() else {
                     return;
                 };
-                let mut n = 0;
-                for i in 0..self.profiles.len() {
-                    let p = self.profiles[i].clone();
-                    let running = self.status.get(&p.name).copied().flatten().is_some();
-                    if !running && profiles::launch(&m, &p).is_ok() {
-                        n += 1;
-                    }
+                let todo: Vec<Profile> = self
+                    .profiles
+                    .iter()
+                    .filter(|p| self.status.get(&p.name).copied().flatten().is_none())
+                    .cloned()
+                    .collect();
+                if todo.is_empty() {
+                    return;
                 }
-                if n > 0 {
-                    self.log(lang.log_launched_all(n));
-                }
-                self.wake_scanner();
+                // 错峰启动：逐个间隔 STAGGER_SECS 秒，避免多个实例在同一瞬间一起建连
+                // （服务端看到的是同一账号/同一出口的建连风暴，更容易被判超限）。
+                run_job(
+                    ctx,
+                    self.shared.clone(),
+                    false,
+                    Box::new(move |push| {
+                        push(lang.log_stagger(todo.len(), STAGGER_SECS));
+                        let mut started: Vec<Profile> = Vec::new();
+                        for (i, p) in todo.iter().enumerate() {
+                            if i > 0 {
+                                std::thread::sleep(Duration::from_secs(STAGGER_SECS));
+                            }
+                            match profiles::launch(&m, p, lang) {
+                                Ok(pid) => {
+                                    started.push(p.clone());
+                                    push(format!("… 启动「{}」 PID {pid}", p.name));
+                                }
+                                Err(e) => push(format!("✗ 「{}」{e:#}", p.name)),
+                            }
+                        }
+                        let n = started.len();
+                        if n > 0 {
+                            // 等页面把登录态落盘后统一回填一次账号，认出同账号的档案
+                            std::thread::sleep(Duration::from_secs(8));
+                            for p in &started {
+                                if let Some((uid, dup)) = profiles::refresh_account(p) {
+                                    push(lang.log_account_bound(&p.name, &uid));
+                                    if let Some(other) = dup {
+                                        push(lang.log_account_same(&p.name, &other, &uid));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(lang.log_launched_all(n))
+                    }),
+                );
             }
             Act::StopAll => {
                 let pids: Vec<u32> = self.status.values().flatten().copied().collect();
@@ -645,6 +739,28 @@ impl App {
                     }),
                 );
             }
+            Act::RebuildCopy(idx) => {
+                let Some(inst) = self.installs.get(idx).cloned() else {
+                    return;
+                };
+                let Some(old) = self.managed.as_ref().map(|m| m.version.clone()) else {
+                    return;
+                };
+                let flags = self.cfg.flags();
+                let dest = install::dest_for(&inst);
+                run_job(
+                    ctx,
+                    self.shared.clone(),
+                    true,
+                    Box::new(move |push| {
+                        push(lang.log_rebuild_start(&inst.version));
+                        let m = install::build(&inst, &dest, &flags, lang, &mut *push)?;
+                        // 锁定新版本：多版本目录共存时，后续启动都走这一份
+                        install::set_active_app(&m.version);
+                        Ok(lang.log_rebuilt(&m.version, &old))
+                    }),
+                );
+            }
             Act::SubmitAdd => self.submit_add(),
         }
         ctx.request_repaint();
@@ -657,6 +773,35 @@ impl eframe::App for App {
         if !self.scan_started {
             self.scan_started = true;
             spawn_scan_thread(ctx.clone(), self.shared.clone());
+        }
+        // 首帧：托管副本里的补丁如果不是当前版本（例如还带着旧版"只隐藏弹窗"的注入脚本），
+        // 自动升级一次——否则新版锚点对不上，界面会一直显示"补丁异常"。
+        if !self.patch_checked {
+            self.patch_checked = true;
+            if let Some(m) = self.managed.clone() {
+                if !m.is_patched(&self.cfg.flags()) {
+                    let flags = self.cfg.flags();
+                    let lang = self.cfg.lang;
+                    run_job(
+                        ctx,
+                        self.shared.clone(),
+                        false,
+                        Box::new(move |push| {
+                            let report = patch::apply(&m.index_js(), &flags)?;
+                            push(lang.log_patch_upgraded());
+                            for (name, st) in report {
+                                let shown: &str = if lang == Lang::En {
+                                    patch::name_en(name)
+                                } else {
+                                    name
+                                };
+                                push(format!("  [{}] {shown}", st.mark()));
+                            }
+                            Ok(lang.log_reapplied())
+                        }),
+                    );
+                }
+            }
         }
         let (log, busy, scan, add_done) = {
             let mut s = self.shared.lock().unwrap();
@@ -739,14 +884,34 @@ impl eframe::App for App {
 
         // 先把要画的数据摆成快照，避免面板闭包里反复借 self
         let install_labels: Vec<String> = self.installs.iter().map(|i| i.label(t)).collect();
-        let rows: Vec<(String, Option<u32>, PathBuf)> = self
+        // 同账号查重：一个 TradingView 账号同时只应有一个档案在线（服务端按账号限连接）
+        let mut owners: HashMap<String, Vec<String>> = HashMap::new();
+        for p in &self.profiles {
+            if let Some(uid) = profiles::account_id(p) {
+                owners.entry(uid).or_default().push(p.name.clone());
+            }
+        }
+        // (名字, PID, 目录, 绑定的账号, 与谁重复)
+        let rows: Vec<(String, Option<u32>, PathBuf, Option<String>, Option<String>)> = self
             .profiles
             .iter()
             .map(|p| {
+                let uid = profiles::account_id(p);
+                let dup = uid.as_ref().and_then(|u| {
+                    owners.get(u).filter(|v| v.len() > 1).map(|v| {
+                        v.iter()
+                            .filter(|n| *n != &p.name)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    })
+                });
                 (
                     p.name.clone(),
                     self.status.get(&p.name).copied().flatten(),
                     p.dir.clone(),
+                    uid,
+                    dup,
                 )
             })
             .collect();
@@ -754,6 +919,13 @@ impl eframe::App for App {
         let has_profile = !rows.is_empty();
         let managed_ok = self.managed.is_some();
         let managed_ver = self.managed.as_ref().map(|m| m.version.clone());
+        // 客户端升级后副本还停在旧版：这里只做提示，不自动重建（副本 200MB+，
+        // 而且新旧版本可能同时在用，删谁必须由人决定）。
+        let newer: Option<(usize, String)> = managed_ver.as_deref().and_then(|cur| {
+            let hit = install::newest_than(&self.installs, cur)?;
+            let idx = self.installs.iter().position(|i| i.root == hit.root)?;
+            Some((idx, hit.version.clone()))
+        });
         let patched = self
             .managed
             .as_ref()
@@ -834,6 +1006,17 @@ impl eframe::App for App {
                     }
                 }
 
+                if let Some((idx, v)) = &newer {
+                    ui.separator();
+                    ui.colored_label(
+                        GREEN,
+                        egui::RichText::new(t.copy_newer.replace("{v}", v)).small(),
+                    )
+                    .on_hover_text(t.copy_newer_hint);
+                    if ui.small_button(t.btn_rebuild).clicked() {
+                        act = Some(Act::RebuildCopy(*idx));
+                    }
+                }
             });
 
             // 未检测到 TradingView 时，给一个醒目的安装提醒（而非让用户对着空列表猜）
@@ -870,13 +1053,6 @@ impl eframe::App for App {
                     toggled = true;
                 }
                 if ui
-                    .checkbox(&mut self.cfg.auth_route, t.cb_auth)
-                    .on_hover_text(t.cb_auth_hint)
-                    .changed()
-                {
-                    toggled = true;
-                }
-                if ui
                     .checkbox(&mut self.cfg.charts_unlock, t.cb_charts)
                     .on_hover_text(t.cb_charts_hint)
                     .changed()
@@ -893,6 +1069,13 @@ impl eframe::App for App {
                 if ui
                     .checkbox(&mut self.cfg.silence_paywalls, t.cb_silence)
                     .on_hover_text(t.cb_silence_hint)
+                    .changed()
+                {
+                    toggled = true;
+                }
+                if ui
+                    .checkbox(&mut self.cfg.auto_recover, t.cb_recover)
+                    .on_hover_text(t.cb_recover_hint)
                     .changed()
                 {
                     toggled = true;
@@ -920,6 +1103,11 @@ impl eframe::App for App {
                     }
                     ui.label(egui::RichText::new(*step).small());
                 }
+            });
+            // 一条必须写进界面的约束：同账号多开会撞服务端的连接限制
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(t.usage_note).small().color(AMBER));
             });
 
             ui.add_space(6.0);
@@ -1065,7 +1253,7 @@ impl eframe::App for App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for (name, pid, dir) in &rows {
+                    for (name, pid, dir, uid, dup) in &rows {
                         egui::Frame::group(ui.style())
                             .inner_margin(egui::Margin::same(12.0))
                             .fill(ui.style().visuals.faint_bg_color)
@@ -1087,7 +1275,6 @@ impl eframe::App for App {
                                     ui.colored_label(dot, "●");
                                     ui.label(egui::RichText::new(name).strong().size(17.0));
                                     ui.label(egui::RichText::new(txt).small().color(dot));
-
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
@@ -1140,6 +1327,31 @@ impl eframe::App for App {
                                         },
                                     );
                                 });
+                                // 账号信息单独一行：同一行已有「名字 + 状态 + 4 个按钮」，
+                                // 再塞账号 ID 在窄窗口会把按钮挤掉。
+                                if uid.is_some() || dup.is_some() {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(18.0);
+                                        if let Some(u) = uid {
+                                            ui.label(
+                                                egui::RichText::new(t.acct_bound.replace("{uid}", u))
+                                                    .small()
+                                                    .weak(),
+                                            )
+                                            .on_hover_text(t.usage_note);
+                                        }
+                                        if let Some(d) = dup {
+                                            ui.colored_label(
+                                                RED,
+                                                egui::RichText::new(
+                                                    t.acct_dup.replace("{name}", d),
+                                                )
+                                                .small(),
+                                            )
+                                            .on_hover_text(t.usage_note);
+                                        }
+                                    });
+                                }
                             });
                         ui.add_space(4.0);
                     }
@@ -1155,5 +1367,53 @@ impl eframe::App for App {
                 self.cfg.lang.s().app_title.to_string(),
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// 回归：两个账号各有一条登录 URL 时，**不能每轮都判定"发现新 URL"**。
+    /// 旧实现只维护一个全局 last，两个账号会互相顶掉 → 每 2 秒触发一次，
+    /// 反复打开登录页并叠加接管线程（用户看到命令行窗口一直在闪）。
+    #[test]
+    fn two_accounts_do_not_retrigger_every_scan() {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        let a = "https://auth.tradingview.com/connect/?key=AAA".to_string();
+        let b = "https://auth.tradingview.com/connect/?key=BBB".to_string();
+
+        let items = || {
+            vec![
+                ("colonychain".to_string(), a.clone()),
+                ("dog000".to_string(), b.clone()),
+            ]
+            .into_iter()
+        };
+
+        // 第一轮：确实有新 URL，触发一次
+        assert!(pick_unseen_url(&mut seen, items()).is_some());
+        assert_eq!(seen.len(), 2, "两个档案都要被记住，否则会互相顶掉");
+
+        // 第二轮、第三轮：同样的 URL，不能再触发
+        assert_eq!(pick_unseen_url(&mut seen, items()), None);
+        assert_eq!(pick_unseen_url(&mut seen, items()), None);
+
+        // 某个账号重新登录（URL 变化）→ 只触发那一条
+        let c = "https://auth.tradingview.com/connect/?key=CCC".to_string();
+        let got = pick_unseen_url(
+            &mut seen,
+            vec![
+                ("colonychain".to_string(), a.clone()),
+                ("dog000".to_string(), c.clone()),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(got, Some(("dog000".to_string(), c)));
+        // 再变回旧 URL 仍算"这个档案又变了一次"（只看自己的上一条，日志只追加，
+        // 真实场景不会来回跳）——重点是 colonychain 那条不会被顺带重触发。
+        let back = pick_unseen_url(&mut seen, items());
+        assert_eq!(back.as_ref().map(|(n, _)| n.as_str()), Some("dog000"));
     }
 }

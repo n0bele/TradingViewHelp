@@ -46,6 +46,146 @@ pub fn list() -> Vec<Profile> {
     out
 }
 
+// ---------------------------------------------------------------- 账号身份
+//
+// 「一个账号 = 一个 profile」靠这里落地：登录回调里解出 JWT 的 user_id，
+// 写进账号目录的 `.tvx-user`；启动时若同一 user_id 已有另一个实例在线，直接拒绝。
+// 服务端按账号限制并发连接，同账号双开必被踢——这不是客户端能改的配额，
+// 客户端能做的是别把自己撞上去。
+
+/// 账号目录里记录 TradingView `user_id` 的小文件（不是密码、也不是令牌）。
+const UID_FILE: &str = ".tvx-user";
+
+/// 该档案绑定的 TradingView 账号 ID（登录回调时写入）。
+pub fn account_id(profile: &Profile) -> Option<String> {
+    let raw = fs::read_to_string(profile.dir.join(UID_FILE)).ok()?;
+    let raw = raw.trim();
+    (!raw.is_empty()).then(|| raw.to_string())
+}
+
+fn set_account_id(profile: &Profile, uid: &str) {
+    let uid = uid.trim();
+    if !uid.is_empty() {
+        let _ = fs::write(profile.dir.join(UID_FILE), uid);
+    }
+}
+
+/// 其它绑定到同一账号的档案：返回 (名字, 是否在跑)。
+pub fn same_account_others(profile: &Profile, uid: &str) -> Vec<(String, bool)> {
+    list()
+        .into_iter()
+        .filter(|p| p.name != profile.name)
+        .filter(|p| account_id(p).as_deref() == Some(uid))
+        .map(|p| {
+            let running = running_pid(&p).is_some();
+            (p.name, running)
+        })
+        .collect()
+}
+
+/// base64url 解码（JWT 用；不引依赖）。
+fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4 + 3);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        } as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// 从 `tradingview://browser-auth/?token=…` 里解出 JWT 载荷的 `user_id`。
+/// 实测该 token 的 claims 只有 exp / iat / jti / user_id，没有用户名。
+pub fn jwt_user_id(url: &str) -> Option<String> {
+    let token = url.split("token=").nth(1)?;
+    let token = token.split('&').next()?;
+    let payload = token.split('.').nth(1)?;
+    let bytes = b64url_decode(payload)?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    match v.get("user_id")? {
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// 从 localStorage 的 LevelDB 里认账号，**只认唯一解**：
+/// 全库只出现过一个 userId 才采信。出现多个说明这个档案登录过不止一个账号
+/// （或 LevelDB 分块/压缩导致字符串错位），这时宁可留空、让人重新登录绑定，
+/// 也不能猜错——猜错会误拦别的档案启动。
+fn detect_uid_from_storage(profile: &Profile) -> Option<String> {
+    let dir = profile.dir.join("Local Storage").join("leveldb");
+    let mut all: Vec<String> = Vec::new();
+    for e in fs::read_dir(&dir).ok()?.flatten() {
+        let path = e.path();
+        let Ok(meta) = e.metadata() else { continue };
+        // localStorage 正常只有几 MB；异常大就跳过，不在启动路径上啃大文件
+        if !meta.is_file() || meta.len() > 8 * 1024 * 1024 {
+            continue;
+        }
+        let Ok(raw) = fs::read(&path) else { continue };
+        for uid in scan_user_records(&raw) {
+            if !all.contains(&uid) {
+                all.push(uid);
+            }
+        }
+    }
+    (all.len() == 1).then(|| all.remove(0))
+}
+
+/// 在字节流里扫 `"userId":<数字>`（LevelDB 的 .log 段是明文，能直接扫到）。
+fn scan_user_records(b: &[u8]) -> Vec<String> {
+    let key = b"\"userId\":";
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + key.len() <= b.len() {
+        if &b[i..i + key.len()] != key {
+            i += 1;
+            continue;
+        }
+        let mut j = i + key.len();
+        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+            j += 1;
+        }
+        let st = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > st {
+            out.push(String::from_utf8_lossy(&b[st..j]).to_string());
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+pub fn refresh_account(profile: &Profile) -> Option<(String, Option<String>)> {
+    if account_id(profile).is_some() {
+        return None;
+    }
+    let uid = detect_uid_from_storage(profile)?;
+    set_account_id(profile, &uid);
+    let other = same_account_others(profile, &uid)
+        .into_iter()
+        .find(|(_, running)| *running)
+        .map(|(name, _)| name);
+    Some((uid, other))
+}
+
 pub fn validate_name(name: &str, lang: Lang) -> Result<String> {
     let n = name.trim();
     if n.is_empty() {
@@ -380,7 +520,16 @@ fn chrono_like_now() -> String {
 /// 每个实例用自己的 `--user-data-dir` 起一个短命进程转发 URL——Electron 的单实例锁
 /// 会把参数投递给该 profile 的主进程；正在等登录的那个实例会处理，其余会忽略。
 pub fn route_auth(url: &str) {
-    auth_log(&format!("收到回调：{url}"));
+    auth_log(&format!("收到回调：{}", mask_token(url)));
+
+    // 回调 URL 里的 token 是本次登录的凭据：解出 user_id 就能把"这个档案登录了哪个账号"
+    // 记下来。只写到 login-target（启动时写入、扫描线程负责维持），不往别的档案头上记。
+    let uid = jwt_user_id(url);
+    let target = fs::read_to_string(crate::install::tvx_root().join("login-target"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let Some(managed) = crate::install::load_managed() else {
         return;
     };
@@ -392,16 +541,49 @@ pub fn route_auth(url: &str) {
             auth_log(&format!("  跳过 {}（没有实例在跑）", p.name));
             continue;
         }
+        if let (Some(uid), Some(t)) = (&uid, &target) {
+            if &p.dir.display().to_string() == t {
+                set_account_id(&p, uid);
+                auth_log(&format!("  账号 {uid} 已绑定到 {}", p.name));
+                let others = same_account_others(&p, uid);
+                if let Some((name, _)) = others.iter().find(|(_, running)| *running) {
+                    auth_log(&format!(
+                        "  ⚠ 同一账号已在「{name}」在线：同账号双开会触发服务端连接限制"
+                    ));
+                } else if let Some((name, _)) = others.first() {
+                    auth_log(&format!(
+                        "  ⚠ 该账号也登录过「{name}」：建议一个账号只保留一个档案"
+                    ));
+                }
+            }
+        }
         auth_log(&format!("  转发给 {}", p.name));
-        let _ = Command::new(&exe)
+        if let Ok(child) = Command::new(&exe)
             .arg(format!("--user-data-dir={}", p.dir.display()))
             .arg(url)
             .env_remove("ELECTRON_RUN_AS_NODE")
             .env_remove("ELECTRON_NO_ATTACH_CONSOLE")
             .env_remove("ELECTRON_ENABLE_LOGGING")
             .env_remove("NODE_OPTIONS")
-            .spawn();
+            .spawn()
+        {
+            // 记下 pid：接管脚本要跳过它，别把我们正在用的实例当成"被抢的回调"杀掉
+            record_spawned(child.id());
+        }
     }
+}
+
+/// 日志里不落完整 token（那是可用的登录凭据）。
+fn mask_token(url: &str) -> String {
+    let Some((head, rest)) = url.split_once("token=") else {
+        return url.to_string();
+    };
+    let (tok, tail) = match rest.split_once('&') {
+        Some((t, r)) => (t, format!("&{r}")),
+        None => (rest, String::new()),
+    };
+    let keep: String = tok.chars().take(12).collect();
+    format!("{head}token={keep}…{tail}")
 }
 
 /// 在**应用自己的标签页**里打开一个 URL（登录页走这里）。
@@ -437,15 +619,41 @@ pub fn open_in_app_tab(profile: &Profile, url: &str) -> anyhow::Result<()> {
 ///
 /// 这里跑一个**单次**子进程轮询脚本（仅登录期间，最多 `secs` 秒），把带 token 的
 /// 命令行捞出来交给 `route_auth` 广播给我们的实例，并结束那个抢走回调的进程。
+/// 我们自己 spawn 出来的实例 pid（转发回调时启动的）。
+/// 接管脚本必须跳过它们，否则会把"正在登录的那个实例"当成被抢走的回调杀掉、
+/// 再重新拉起——形成自激循环。
+fn handoff_skip_path() -> PathBuf {
+    tvx_root().join("handoff-skip")
+}
+
+fn record_spawned(pid: u32) {
+    let p = handoff_skip_path();
+    let mut ids: Vec<u32> = fs::read_to_string(&p)
+        .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    if ids.contains(&pid) {
+        return;
+    }
+    ids.push(pid);
+    // 只留最近 20 个：pid 会被系统复用，留太多反而误跳过
+    let keep = ids.len().saturating_sub(20);
+    let list: Vec<String> = ids[keep..].iter().map(|i| i.to_string()).collect();
+    let _ = fs::write(&p, format!("{}\n", list.join("\n")));
+}
+
 #[cfg(windows)]
 fn capture_handoff(secs: u32) -> Option<(u32, String)> {
     use std::io::Write;
 
+    let skip_path = handoff_skip_path();
     let script = format!(
-        r#"$deadline=(Get-Date).AddSeconds({secs})
+        r#"$skip=@()
+$sf=if($args.Count -gt 0){{ $args[0] }}else{{ '' }}
+if($sf -and (Test-Path $sf)){{ $skip=@(Get-Content $sf | Where-Object {{ $_ -match '^[0-9]+$' }} | ForEach-Object {{ [int]$_ }}) }}
+$deadline=(Get-Date).AddSeconds({secs})
 while((Get-Date) -lt $deadline){{
   $p = Get-CimInstance Win32_Process -Filter "Name='TradingView.exe'" |
-       Where-Object {{ $_.CommandLine -like '*tradingview://browser-auth*' }} |
+       Where-Object {{ $_.CommandLine -like '*tradingview://browser-auth*' -and ($skip -notcontains $_.ProcessId) }} |
        Select-Object -First 1
   if($p){{
     $c=$p.CommandLine; $i=$c.IndexOf('tradingview://')
@@ -474,6 +682,7 @@ while((Get-Date) -lt $deadline){{
             "-File",
         ])
         .arg(&tmp)
+        .arg(&skip_path)
         .env_remove("ELECTRON_RUN_AS_NODE")
         .output()
         .ok()?;
@@ -540,8 +749,16 @@ fn capture_handoff(secs: u32) -> Option<(u32, String)> {
     None
 }
 
+/// 同一时间只允许一个接管线程。每次触发都 spawn 的话，90 秒窗口内会叠出
+/// 几十个轮询进程（每个都在查进程命令行），表现为"命令行窗口一直在闪"。
+static HANDOFF_WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 登录期间调用：抓一次被抢走的回调并转发给我们的实例。
 pub fn spawn_handoff_watcher(ctx: eframe::egui::Context) {
+    use std::sync::atomic::Ordering;
+    if HANDOFF_WATCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(move || {
         if let Some((pid, url)) = capture_handoff(90) {
             route_auth(&url);
@@ -551,6 +768,7 @@ pub fn spawn_handoff_watcher(ctx: eframe::egui::Context) {
             }
             ctx.request_repaint();
         }
+        HANDOFF_WATCHING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -567,9 +785,27 @@ pub fn capture_handoff_once(secs: u32) -> Option<(u32, String)> {
     got
 }
 
-pub fn launch(managed: &Managed, profile: &Profile) -> Result<u32> {
+pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<u32> {
     if let Some(pid) = running_pid(profile) {
         return Ok(pid);
+    }
+
+    // 一个账号一个 profile：同账号的另一个实例正在线时直接拒绝启动。
+    // 服务端按账号限制并发连接，同账号双开等于主动撞限制——表现就是某个窗口
+    // 静默停更（弹窗被自动恢复盖过去了也还是会反复断）。档案还没绑定时，
+    // 先尝试从 localStorage 里把当前 user_id 认出来。
+    let uid = account_id(profile).or_else(|| {
+        let d = detect_uid_from_storage(profile)?;
+        set_account_id(profile, &d);
+        Some(d)
+    });
+    if let Some(uid) = &uid {
+        if let Some((name, _)) = same_account_others(profile, uid)
+            .into_iter()
+            .find(|(_, running)| *running)
+        {
+            bail!(lang.dup_account(uid, &name));
+        }
     }
     // macOS：每个账号一份独立的 .app 副本（独立 bundle id → 独立 userData 与 scheme 归属）
     #[cfg(target_os = "macos")]
@@ -669,6 +905,40 @@ mod tests {
     use super::*;
     use crate::install;
 
+    /// 登录回调 URL → JWT 载荷里的 user_id（账号查重全靠它）
+    #[test]
+    fn jwt_user_id_from_browser_auth_url() {
+        let payload = "eyJleHAiOjEsImlhdCI6MSwianRpIjoieCIsInVzZXJfaWQiOjY2NzgyMDg5fQ";
+        let url = format!("tradingview://browser-auth/?token=eyJhbGciOiJIUzUxMiJ9.{payload}.sig");
+        assert_eq!(jwt_user_id(&url).as_deref(), Some("66782089"));
+        // 不是 token 的回调 / 残缺 token 一律返回 None，不能猜
+        assert_eq!(jwt_user_id("tradingview://auth?token=fake4"), None);
+        assert_eq!(jwt_user_id("tradingview://browser-auth/?state=1"), None);
+    }
+
+    /// 只有全库唯一 userId 才采信；出现第二个就不猜（宁可不拦，也不误拦）
+    #[test]
+    fn detect_uid_requires_unique_record() {
+        let name = "tvx-uid-test";
+        let dir = profiles_root().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        let ldb = dir.join("Local Storage").join("leveldb");
+        fs::create_dir_all(&ldb).unwrap();
+        let p = Profile {
+            name: name.into(),
+            dir: dir.clone(),
+        };
+
+        fs::write(ldb.join("000003.log"), br#"{"syncedAt":100,"userId":222}"#).unwrap();
+        assert_eq!(detect_uid_from_storage(&p).as_deref(), Some("222"));
+
+        // 又多出一个历史账号 → 无法确定当前是哪个，返回 None
+        fs::write(ldb.join("000004.log"), br#"{"userId":333}"#).unwrap();
+        assert_eq!(detect_uid_from_storage(&p), None);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn name_validation() {
         assert!(validate_name("主号", Lang::Zh).is_ok());
@@ -736,7 +1006,7 @@ mod tests {
         let p = create(name, Lang::Zh).expect("创建档案失败");
         assert!(p.dir.is_dir());
 
-        let pid = launch(&managed, &p).expect("启动失败");
+        let pid = launch(&managed, &p, Lang::Zh).expect("启动失败");
         // Windows：启动后深链协议必须指向这个账号的目录，否则浏览器回调会落错 profile
         #[cfg(windows)]
         {
@@ -820,8 +1090,8 @@ mod multi_tests {
             made.push(create(n, Lang::Zh).expect("建档案失败"));
         }
 
-        let p1 = launch(&managed, &made[0]).expect("启动 1 失败");
-        let p2 = launch(&managed, &made[1]).expect("启动 2 失败");
+        let p1 = launch(&managed, &made[0], Lang::Zh).expect("启动 1 失败");
+        let p2 = launch(&managed, &made[1], Lang::Zh).expect("启动 2 失败");
         assert_ne!(p1, p2, "两个实例不应是同一个进程");
 
         std::thread::sleep(std::time::Duration::from_secs(9));

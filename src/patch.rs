@@ -26,8 +26,9 @@ use std::path::Path;
 pub const VERIFIED_VERSION: &str = "3.5.0.8375";
 
 /// 用户可配置的功能开关（持久化在 tvx 的 config.json）。
-/// 五项覆盖六条需求：广告拦截 / 多图表解锁 / 指标叠加解锁 / 禁用自动更新各自独立；
+/// 广告拦截 / 多图表解锁 / 指标叠加解锁 / 禁用自动更新 / 断线自愈各自独立；
 /// 指标数量 / 布局保存 / 警报由服务端强制（客户端无法解除拒绝），共用「屏蔽充值窗口」。
+/// 登录回调直达不在其中：它是多账号能用起来的前提（见 `Group::Auth`），恒开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
     pub ads_block: bool,
@@ -35,7 +36,8 @@ pub struct Flags {
     pub study_on_study: bool,
     pub silence_paywalls: bool,
     pub no_auto_update: bool,
-    pub auth_route: bool,
+    /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
+    pub auto_recover: bool,
 }
 
 impl Default for Flags {
@@ -46,7 +48,7 @@ impl Default for Flags {
             study_on_study: true,
             silence_paywalls: true,
             no_auto_update: true,
-            auth_route: true,
+            auto_recover: true,
         }
     }
 }
@@ -65,8 +67,12 @@ pub enum Group {
     /// 禁用启动时的自动更新检查
     NoAutoUpdate,
     /// 登录回调直达：每个实例把 `--user-data-dir` 写进 tradingview:// 注册，
-    /// 授权回调才会回到"发起登录的那个实例"（否则 state 不匹配，新授权被丢弃）
+    /// 授权回调才会回到"发起登录的那个实例"（否则 state 不匹配，新授权被丢弃）。
+    /// 恒开、不提供开关：多账号在 Windows 上必须靠它才能登录成功，
+    /// 而 macOS 走的是「一个账号一个独立 App」的等价机制，不需要用户选择。
     Auth,
+    /// 断线自愈（服务端踢连接后自动恢复，不改配额）
+    Recover,
 }
 
 impl Group {
@@ -77,7 +83,8 @@ impl Group {
             Group::Charts => f.charts_unlock,
             Group::StudyOnStudy => f.study_on_study,
             Group::NoAutoUpdate => f.no_auto_update,
-            Group::Auth => f.auth_route,
+            Group::Auth => true,
+            Group::Recover => f.auto_recover,
         }
     }
 }
@@ -122,6 +129,69 @@ const MULTI_CHART_UNLOCK: &str = "(function(){try{var n=0;(function p(){var c=wi
 #[cfg(test)]
 const STUDY_ON_STUDY_UNLOCK: &str = "(function(){try{var n=0;(function p(){var ok=!1;try{var c=Object.keys(window).filter(function(k){return /webpackChunk/i.test(k)});if(c.length){var rq=null;window[c[0]].push([[Date.now()%1e6],{},function(r){rq=r}]);if(typeof rq=='function'){for(var ids=Object.keys(rq.m),i=0;i<ids.length;i++){var s=String(rq.m[ids[i]]);if(!(s.indexOf('child_limit')>=0&&s.indexOf('getConfig:')>=0))continue;var m=rq(ids[i]);if(!m||typeof m.getConfig!='function')continue;var f=m.getConfig('STUDY_ON_STUDY');if(f&&typeof f=='object'){f.child_limit=99;ok=!0;break}}}}}catch(e){}if(!(ok||n>120)){n++;setTimeout(p,1e3)}})()}catch(e){}})();";
 
+/// 注入到图表页的断线自愈脚本（单引号书写：整串要嵌在 `executeJavaScript("…")` 里）。
+/// 逻辑：发现「连接已关闭 / 恢复连接」类弹窗 → 先点「恢复连接 / Reconnect」；
+/// 4 秒后弹窗还在就重载页面（会话与布局都在服务端，重载会重新拉历史数据）；
+/// 之后按 15s / 60s / 5min 再试，最多 4 次后停手——配额真的不够时保留弹窗，
+/// 至少让人看见原因，而不是静默停更。
+/// 连续 60 秒没有弹窗就把计数清零：否则一次用满次数后，这个标签页在关掉之前
+/// 再断线也不会自愈（sessionStorage 跨重载保留）。
+///
+/// **文案匹配必须是多语言的**：图表页的语言跟随 TradingView 账号设置，不是助手的
+/// `lang`。这里覆盖 zh_CN / zh_TW / en / de / ru / ja / ko / es / fr / pt / tr /
+/// vi / th / id / pl / it / ar。界面文案是这套匹配唯一的依赖，新增语言时只改
+/// `K`（弹窗文案）与 `R`（重连按钮）两条正则；未能匹配只是不自愈，不会误点。
+/// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
+/// 当前版本：重试次数写在 sessionStorage 里，跨页面重载仍然有效——
+/// 否则 reload 后计数归零，服务端一直拒绝时会变成每 4 秒重载一次的循环。
+#[cfg(test)]
+const DISCONNECT_RECOVER: &str = "(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();";
+
+/// 注入到图表页的「页内推广浮层关闭器」。
+///
+/// 背景：充值/升级提示已经不再只是壳层弹窗——TradingView 现在会在图表页里
+/// 自己渲染一个推广浮层（React 弹层），壳层那四条补丁（nk / showPaywall /
+/// requestProFeature / OPEN_NEW_WINDOW 过滤）都碰不到它。
+///
+/// 策略：**能点关闭就点关闭；实在没有关闭按钮，才摘掉浮层节点**。
+/// 实测「在TradingView电脑版分析市场 / 立刻升级」这张推广卡（Basic → Essential）
+/// 就是没有关闭按钮的：ESC 无效、点遮罩也无效，只能重载页面或摘节点。
+///
+/// **识别不靠译文，靠不翻译的品牌词**：弹层里必须同时出现 `TradingView` 与至少两个
+/// 套餐名（Basic / Essential / Premium / Plus / Ultimate / Advanced——这些是品牌词，
+/// 任何语言都不翻译），再加上至少一个按钮。这样德语、日语、俄语等界面下同样有效，
+/// 不必为每种语言维护标题译文（`A` 里的中英文标题只作额外兜底）。
+///
+/// 三道保险，避免误伤功能拒绝类提示：
+///   1. 文案里出现「上限/已达到/无法/limit/reached/erreicht/limite…」时跳过（那是拒绝，不是推广）；
+///   2. 文案里出现「恢复连接/连接已关闭」时跳过（交给断线自愈处理）；
+///   3. 摘节点时向上取整层浮层，但**遇到含 canvas 的容器就停**（那是图表本体，绝不能动）。
+/// 每个浮层节点只处理一次，且 2 秒内最多处理一次，防止反复渲染时来回拉扯。
+/// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
+#[cfg(test)]
+const PROMO_CLOSER: &str = "(function(){try{if(window.__tvxPromo)return;window.__tvxPromo=1;var T=/TradingView/i;var L=/上限|已达到|无法|不足|超过|limit|reached|exceed|erreicht|ausgesch|limite|atteint|制限|한도|превыш|недоступ|максим/i;var U=/upgrade|pricing|升级|升級|plan/i;var A=/在 ?TradingView ?电脑版分析市场|Analyze markets in TradingView Desktop/i;var tier=/basic|essential|premium|plus|ultimate|advanced/gi;var last=0;function tiers(s){var m=s.match(tier),i,k,o={},c=0;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function closer(r){var b=r.querySelectorAll('button,[role=button],a'),i,x,al,dn,t;for(i=0;i<b.length;i++){x=b[i];al=(x.getAttribute&&x.getAttribute('aria-label'))||'';dn=(x.getAttribute&&x.getAttribute('data-name'))||'';t=(x.textContent||'').trim();if(/close|dismiss|schlie/i.test(al)||/close/i.test(dn)||/^(×|✕|✖|关闭|關閉|稍后|稍後|以后|不用了|Not now|Maybe later|Close|Schließen|Fermer|Cerrar|Chiudi|Fechar|Закрыть|閉じる|닫기|Đóng|Kapal|Fechar|Kapat)$/i.test(t))return x}return null}function hit(){var q=document.querySelectorAll('[role=dialog],dialog,[class*=modal],[class*=overlay],[class*=popup],[data-name*=dialog],[data-name*=popup]'),i,e,t,k;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxPromoDone)continue;t=(e.textContent||'').trim();if(!t||t.length>3000)continue;if(L.test(t))continue;if(!T.test(t)&&!A.test(t))continue;k=tiers(t);if(!(k>=2||(k>=1&&U.test(t))||A.test(t)))continue;if(!e.querySelector('button,[role=button],a'))continue;return e}return null}function ok(e){var r=e.getBoundingClientRect(),full=r.width>=vw()*0.95&&r.height>=vh()*0.95;if(!full)return true;if(e.querySelector&&e.querySelector('canvas'))return false;return !e.children||e.children.length<=2}function pick(n){var c=n,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(!ok(c))break;b=c;if(c.parentNode===document.body)break;c=c.parentNode}return b||n}function unlock(){try{document.documentElement.style.overflow=''}catch(e){}try{document.body.style.overflow='';document.body.style.pointerEvents=''}catch(e){}}function tick(){var d=hit();if(!d)return;var now=Date.now();if(now-last<2000)return;d.__tvxPromoDone=1;var c=closer(d);if(c){last=now;try{c.click()}catch(e){}return}var o=pick(d);last=now;try{o.style.setProperty('display','none','important')}catch(e){o.style.display='none'}o.setAttribute('data-tvx-promo-hidden','1');unlock();setTimeout(unlock,400)}setInterval(tick,1200)}catch(e){}})();";
+
+/// 上一版（计数只存内存，重载即清零）。已打过的副本要先迁移到当前版本。
+/// handleDomReady 段的开头（补丁 new 与迁移文本都必须以它起头）
+const DOM_READY_HEAD: &str =
+    "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"";
+
+/// 被替换掉的原始锚点尾巴（恢复功能关闭时回退到这里）
+const OLD_RECOVER_ANCHOR: &str = "\").catch((()=>{})),this.url&&";
+
+const LEGACY_RECOVER_V1: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript("(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;var n=0,last=0,waits=[15000,60000,300000];function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<600&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(/恢复连接|重新连接|Restore connection|Reconnect/i.test(t))return b[i]}return null}function tick(){var d=dlg();if(!d)return;d.setAttribute('data-tvx-recovering','1');var b=btn(d);if(b){try{b.click()}catch(e){}}setTimeout(function(){if(!dlg())return;if(n>=3)return;var now=Date.now();if(now-last<(waits[n]||3e5))return;last=now;n++;try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();").catch((()=>{})),this.url&&"#;
+
+/// 旧版本注入过的「只隐藏不恢复」脚本。已装好的副本里是这段文本，
+/// apply() 会先把它升级成新脚本（或按开关撤回成原始锚点），
+/// 否则新版 old 锚点对不上，会被判成"锚点失配"而整体失败。
+const LEGACY_HIDE_DISCONNECT: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript("(function(){try{if(window.__tvxNoDisconnect)return;window.__tvxNoDisconnect=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;function s(){var n=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<n.length;i++){var e=n[i],t=e.textContent||'';if(t.length<600&&K.test(t)){e.style.display='none';e.setAttribute('data-tvx-hidden','1')}}}setInterval(s,800)}catch(e){}})();").catch((()=>{})),this.url&&"#;
+
+/// 需要就地迁移的历史注入文本：(所属补丁名, 旧文本)
+const LEGACY: &[(&str, &str)] = &[
+    ("断线自动恢复", LEGACY_HIDE_DISCONNECT),
+    ("断线自动恢复", LEGACY_RECOVER_V1),
+];
+
 pub const PATCHES: &[Patch] = &[
     Patch {
         name: "订阅遮罩窗口不再创建",
@@ -153,6 +223,19 @@ pub const PATCHES: &[Patch] = &[
         // 只拦 URL 命中充值/推广关键字的请求，正常业务开窗（K 线弹窗、分享等）不受影响。
         old: "null==n||!1===(0,M.HU)(n))return;const o={url:n};",
         new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial)/i.test(String(n)))return;const o={url:n};",
+    },
+    Patch {
+        name: "页内充值浮层自动关闭",
+        name_en: "Dismiss in-page upgrade popups",
+        group: Group::Silence,
+        // 前三条只管壳层（独立窗口 / IPC）。TradingView 后来把升级提示改成
+        // 图表页自己渲染的浮层，壳层补丁压根看不到它——这条在 tab 的 dom-ready
+        // 里注入一个轮询：按文案找到推广浮层，能点关闭就点关闭，没有关闭按钮才摘节点。
+        // 实测「在TradingView电脑版分析市场 / 立刻升级」那张卡就没有关闭按钮，
+        // ESC 与点遮罩都无效（只能重载页面），所以必须留"摘节点"这条路。
+        // 真正的功能拒绝提示（带「上限/无法」）与断线提示都会被跳过。
+        old: ".on(\"dom-ready\",(()=>{this.handleDomReady()}))",
+        new: ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"(function(){try{if(window.__tvxPromo)return;window.__tvxPromo=1;var T=/TradingView/i;var L=/上限|已达到|无法|不足|超过|limit|reached|exceed|erreicht|ausgesch|limite|atteint|制限|한도|превыш|недоступ|максим/i;var U=/upgrade|pricing|升级|升級|plan/i;var A=/在 ?TradingView ?电脑版分析市场|Analyze markets in TradingView Desktop/i;var tier=/basic|essential|premium|plus|ultimate|advanced/gi;var last=0;function tiers(s){var m=s.match(tier),i,k,o={},c=0;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function closer(r){var b=r.querySelectorAll('button,[role=button],a'),i,x,al,dn,t;for(i=0;i<b.length;i++){x=b[i];al=(x.getAttribute&&x.getAttribute('aria-label'))||'';dn=(x.getAttribute&&x.getAttribute('data-name'))||'';t=(x.textContent||'').trim();if(/close|dismiss|schlie/i.test(al)||/close/i.test(dn)||/^(×|✕|✖|关闭|關閉|稍后|稍後|以后|不用了|Not now|Maybe later|Close|Schließen|Fermer|Cerrar|Chiudi|Fechar|Закрыть|閉じる|닫기|Đóng|Kapal|Fechar|Kapat)$/i.test(t))return x}return null}function hit(){var q=document.querySelectorAll('[role=dialog],dialog,[class*=modal],[class*=overlay],[class*=popup],[data-name*=dialog],[data-name*=popup]'),i,e,t,k;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxPromoDone)continue;t=(e.textContent||'').trim();if(!t||t.length>3000)continue;if(L.test(t))continue;if(!T.test(t)&&!A.test(t))continue;k=tiers(t);if(!(k>=2||(k>=1&&U.test(t))||A.test(t)))continue;if(!e.querySelector('button,[role=button],a'))continue;return e}return null}function ok(e){var r=e.getBoundingClientRect(),full=r.width>=vw()*0.95&&r.height>=vh()*0.95;if(!full)return true;if(e.querySelector&&e.querySelector('canvas'))return false;return !e.children||e.children.length<=2}function pick(n){var c=n,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(!ok(c))break;b=c;if(c.parentNode===document.body)break;c=c.parentNode}return b||n}function unlock(){try{document.documentElement.style.overflow=''}catch(e){}try{document.body.style.overflow='';document.body.style.pointerEvents=''}catch(e){}}function tick(){var d=hit();if(!d)return;var now=Date.now();if(now-last<2000)return;d.__tvxPromoDone=1;var c=closer(d);if(c){last=now;try{c.click()}catch(e){}return}var o=pick(d);last=now;try{o.style.setProperty('display','none','important')}catch(e){o.style.display='none'}o.setAttribute('data-tvx-promo-hidden','1');unlock();setTimeout(unlock,400)}setInterval(tick,1200)}catch(e){}})();\").catch((()=>{}))}))",
     },
     Patch {
         name: "广告/追踪域名网络拦截",
@@ -216,13 +299,17 @@ pub const PATCHES: &[Patch] = &[
         new: ":0)}catch(e){",
     },
     Patch {
-        name: "隐藏站点「连接已关闭」弹窗",
-        name_en: "Hide the site's 'connection closed' dialog",
-        group: Group::Silence,
+        name: "断线自动恢复",
+        name_en: "Auto-recover from disconnect dialogs",
+        group: Group::Recover,
         // 该弹窗由网页下发（本地包里没有这段文案），触发原因是服务器判定同账号并发超限。
-        // 这里在页面里挂一个观察器，把这类弹窗直接藏掉，避免打断看盘。
+        // 原来的做法是把弹窗直接藏掉，结果是窗口静默停更、用户完全看不出原因。
+        // 现在改成自愈：先尝试点「恢复连接 / Reconnect」，4 秒仍未恢复就重载页面；
+        // 之后按 15s/60s/5min 再试，最多 4 次，之后停手并让弹窗留着（把原因还给人）。
+        // 连续 60 秒无弹窗则清零计数，避免用满次数后整个标签页不再自愈。
+        // 这不改变服务端并发配额——配额在服务端强制，客户端没有可改的 gate。
         old: "handleDomReady(){this.isBrowserViewValid()&&(this.url&&",
-        new: "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"(function(){try{if(window.__tvxNoDisconnect)return;window.__tvxNoDisconnect=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;function s(){var n=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<n.length;i++){var e=n[i],t=e.textContent||'';if(t.length<600&&K.test(t)){e.style.display='none';e.setAttribute('data-tvx-hidden','1')}}}setInterval(s,800)}catch(e){}})();\").catch((()=>{})),this.url&&",
+        new: "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();\").catch((()=>{})),this.url&&",
     },
     Patch {
         name: "放宽离线判定超时",
@@ -270,6 +357,15 @@ impl Status {
     }
 }
 
+/// 定位「断线自动恢复」注入段的字节区间：从 `DOM_READY_HEAD` 到 `OLD_RECOVER_ANCHOR`。
+/// 段的边界是稳定的（脚本本体怎么改都不影响），所以历史脚本可以按段整体替换，
+/// 不必为每一版都写一条 LEGACY 全文。
+fn recover_segment_range(src: &str) -> Option<(usize, usize)> {
+    let start = src.find(DOM_READY_HEAD)?;
+    let tail = src[start..].find(OLD_RECOVER_ANCHOR)?;
+    Some((start, start + tail + OLD_RECOVER_ANCHOR.len()))
+}
+
 /// 按开关对解包后的 index.js 应用/撤回补丁。任一处匹配数不为 1 就整体失败，
 /// 避免"打了一半"的半残状态。
 ///
@@ -285,6 +381,49 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
 
     let mut report = Vec::new();
     let mut failures = Vec::new();
+
+    // 0) 历史注入文本先就地升级：已装好的副本里还是旧脚本时，新版锚点是对不上的。
+    //    按当前开关决定升级成新脚本（开）还是撤回成原始锚点（关）。
+    for (patch_name, legacy) in LEGACY {
+        let Some(p) = PATCHES.iter().find(|p| p.name == *patch_name) else {
+            continue;
+        };
+        if !src.contains(legacy) {
+            continue;
+        }
+        match src.matches(legacy).count() {
+            1 => {
+                let target = if p.group.enabled(flags) { p.new } else { p.old };
+                src = src.replacen(legacy, target, 1);
+            }
+            n => failures.push(format!(
+                "{}：旧版注入脚本期望 1 处匹配，实际 {n} 处",
+                p.name
+            )),
+        }
+    }
+
+    // 0b) 「断线自动恢复」按段迁移：脚本本身会随版本演进（内存计数 → 会话存储 → 现在的
+    //     首试不等 + 健康清零），每一版的注入文本都不一样，靠 old 精确匹配必然失配。
+    //     段的边界（DOM_READY_HEAD … OLD_RECOVER_ANCHOR）是稳定的，这里整段换成当前版本；
+    //     已是原始锚点或已是当前脚本时不动，交给下面的常规流程给出准确状态。
+    if let Some(p) = PATCHES.iter().find(|p| p.group == Group::Recover) {
+        match src.matches(DOM_READY_HEAD).count() {
+            0 | 1 => {
+                if let Some((s, e)) = recover_segment_range(&src) {
+                    let seg = &src[s..e];
+                    if seg != p.old && seg != p.new {
+                        let target = if p.group.enabled(flags) { p.new } else { p.old };
+                        src.replace_range(s..e, target);
+                    }
+                }
+            }
+            n => failures.push(format!(
+                "{}：handleDomReady 段期望 1 处，实际 {n} 处",
+                p.name
+            )),
+        }
+    }
 
     for p in PATCHES {
         if !p.group.enabled(flags) {
@@ -390,7 +529,7 @@ mod tests {
         // 注入脚本常量与补丁字面文本必须逐字一致，避免两处维护漂移
         let b = PATCHES
             .iter()
-            .find(|p| p.name.contains("多图表"))
+            .find(|p| p.group == Group::Charts)
             .expect("多图表补丁应在补丁集里");
         assert!(b.new.contains(MULTI_CHART_UNLOCK));
     }
@@ -400,11 +539,169 @@ mod tests {
         // 同上：指标叠加注入串常量与补丁字面文本逐字一致
         let s = PATCHES
             .iter()
-            .find(|p| p.name.contains("指标叠加"))
+            .find(|p| p.group == Group::StudyOnStudy)
             .expect("指标叠加补丁应在补丁集里");
         assert!(s.new.contains(STUDY_ON_STUDY_UNLOCK));
         // 注入串里不得出现双引号：它整体包在外层 executeJavaScript("...") 里
         assert!(!STUDY_ON_STUDY_UNLOCK.contains('"'));
+    }
+
+    #[test]
+    fn disconnect_recovery_injection_matches_const() {
+        // 断线自愈脚本与补丁字面文本必须逐字一致；且整串要嵌在双引号里，
+        // 因此脚本内部不得出现双引号（否则会提前闭合 executeJavaScript("…")）。
+        let p = PATCHES
+            .iter()
+            .find(|p| p.group == Group::Recover)
+            .expect("断线自愈补丁应在补丁集里");
+        assert!(p.new.contains(DISCONNECT_RECOVER));
+        assert!(!DISCONNECT_RECOVER.contains('"'));
+        // 弹窗消失后不应再被"藏起来"——旧行为已废弃
+        assert!(!p.new.contains("display='none'"));
+        // 界面语言跟随 TradingView 账号，不能只认中英文：抽查几条非中英词条
+        for s in ["Verbindung wurde geschlossen", "接続を閉じました", "соединение закрыто", "연결이 종료되었습니다"] {
+            assert!(DISCONNECT_RECOVER.contains(s), "断线文案缺少 {s}");
+        }
+        for s in ["Verbindung wiederherstellen", "再接続", "Переподключиться", "Reconectar"] {
+            assert!(DISCONNECT_RECOVER.contains(s), "重连按钮文案缺少 {s}");
+        }
+    }
+
+    #[test]
+    fn promo_closer_injection_matches_const() {
+        // 页内推广浮层脚本必须与常量逐字一致（常量只用于漂移检查），
+        // 同样不得出现双引号：整串嵌在 executeJavaScript("…") 里。
+        let p = PATCHES
+            .iter()
+            .find(|p| p.new.contains("__tvxPromo"))
+            .expect("页内推广浮层补丁应在补丁集里");
+        assert!(p.new.contains(PROMO_CLOSER));
+        assert!(!PROMO_CLOSER.contains('"'));
+        // 这个弹层没有关闭按钮，不能要求"没有按钮就什么都不做"
+        assert!(PROMO_CLOSER.contains("data-tvx-promo-hidden"));
+        // 摘节点时必须避开含 canvas 的容器（图表本体）
+        assert!(PROMO_CLOSER.contains("querySelector('canvas')"));
+        // 识别必须落在"不翻译的品牌词"上：TradingView + 套餐名，而不是某种语言的标题
+        assert!(PROMO_CLOSER.contains("var T=/TradingView/i"));
+        assert!(PROMO_CLOSER.contains("var tier=/basic|essential|premium|plus|ultimate|advanced/gi"));
+    }
+
+    /// 历史注入文本（只隐藏版 / 只存内存计数的 v1）：apply() 必须能就地升级成当前脚本，
+    /// 而不是报"锚点失配"。这是升级路径的回归测试。
+    /// LEGACY 里的文本必须是"完整锚点段"——apply() 拿 p.new 整段去替换它。
+    /// 若只存脚本本体，替换后新段会嵌在脚本位置，得到重复的 handleDomReady，
+    /// 主进程加载即语法错误（真实踩过：TradingView 弹出只有 "Error" 的窗口）。
+    #[test]
+    fn legacy_entries_are_full_segments() {
+        for (name, legacy) in LEGACY {
+            assert!(
+                legacy.starts_with(DOM_READY_HEAD),
+                "{name}：必须以 handleDomReady 段开头"
+            );
+            assert!(
+                legacy.ends_with(OLD_RECOVER_ANCHOR),
+                "{name}：必须以原始锚点 this.url&& 结尾"
+            );
+            assert_eq!(
+                legacy.matches("handleDomReady(){").count(),
+                1,
+                "{name}：只能含一处 handleDomReady"
+            );
+        }
+    }
+
+    /// 任意一版历史注入段（v1 内存计数 / v2 会话存储 / 以后的新版）都必须能按段边界
+    /// 整段换成当前脚本，而不是报"锚点失配"。这里用一个"既不是原始锚点、也不等于
+    /// 当前脚本"的段来模拟历史版本——这正是已装好的副本真实所处的状态。
+    #[test]
+    fn stale_recover_segment_is_migrated_whole() {
+        let dir = std::env::temp_dir().join("tvx-patch-stale-segment-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("index.js");
+
+        let p = PATCHES
+            .iter()
+            .find(|p| p.group == Group::Recover)
+            .expect("断线自愈补丁应在补丁集里");
+        // 模拟旧版：等待序列不同（v2 就是这样）
+        let stale = p.new.replace("var waits=[0,15000,60000,300000]", "var waits=[15000,60000,300000]");
+        assert_ne!(stale, p.new, "模拟的历史脚本不能与当前脚本相同");
+
+        let src: String = PATCHES
+            .iter()
+            .map(|q| if q.group == Group::Recover { stale.as_str() } else { q.new })
+            .collect();
+        fs::write(&f, &src).unwrap();
+
+        // 开：整段换成当前脚本，且文件里只能剩一个 handleDomReady 段
+        apply(&f, &Flags::default()).unwrap();
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(!after.contains(&stale), "历史脚本应被整段换掉");
+        assert!(after.contains(p.new), "应迁移成当前脚本");
+        assert_eq!(
+            after.matches(DOM_READY_HEAD).count(),
+            1,
+            "迁移后 handleDomReady 段必须只有一处"
+        );
+        assert_eq!(after.matches("this.url&&").count(), 1, "尾部锚点必须只有一处");
+        assert!(is_patched(&f, &Flags::default()));
+
+        // 幂等：再跑一次不应改动文件
+        let before = fs::read_to_string(&f).unwrap();
+        let report = apply(&f, &Flags::default()).unwrap();
+        assert!(report.iter().all(|(_, st)| matches!(
+            st,
+            Status::AlreadyPatched | Status::Untouched
+        )));
+        assert_eq!(fs::read_to_string(&f).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_injections_are_migrated_in_place() {
+        let dir = std::env::temp_dir().join("tvx-patch-legacy-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("index.js");
+
+        for (_, legacy) in LEGACY {
+            let mut src = String::new();
+            for p in PATCHES {
+                if p.group == Group::Recover {
+                    src.push_str(legacy);
+                } else {
+                    src.push_str(p.new);
+                }
+            }
+            fs::write(&f, &src).unwrap();
+
+            // 开：历史脚本 → 当前脚本
+            apply(&f, &Flags::default()).unwrap();
+            let after = fs::read_to_string(&f).unwrap();
+            assert!(!after.contains(legacy), "历史脚本应被替换掉");
+            assert!(after.contains(DISCONNECT_RECOVER), "应升级成当前脚本");
+            // 迁移必须整段替换：只换脚本本体会把新段嵌进脚本位置，
+            // 生成两段 handleDomReady → 主进程语法错误、直接弹 Error 窗。
+            assert_eq!(
+                after.matches(DOM_READY_HEAD).count(),
+                1,
+                "迁移后 handleDomReady 段必须只有一处"
+            );
+            assert_eq!(after.matches("this.url&&").count(), 1, "尾部锚点必须只有一处");
+            assert!(is_patched(&f, &Flags::default()));
+        }
+
+        // 关：当前脚本 → 原始锚点
+        let off = Flags {
+            auto_recover: false,
+            ..Flags::default()
+        };
+        apply(&f, &off).unwrap();
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(after.contains("handleDomReady(){this.isBrowserViewValid()&&(this.url&&"));
+        assert!(!after.contains(DISCONNECT_RECOVER));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 用一段含真实 old 锚点的临时文件，验证开关矩阵下的
@@ -448,37 +745,50 @@ mod tests {
         assert!(read().contains(study.new));
         assert!(read().contains(noauto.new));
 
-        // 2) 全关：把刚打的全部撤回，文件应回到逐字 pristine
+        // 2) 全关：可开关的组全部撤回。Auth 组恒开（多账号登录的前提），
+        //    所以期望结果是「pristine + Auth 补丁」，而不是逐字 pristine。
         let all_off = Flags {
             ads_block: false,
             charts_unlock: false,
             study_on_study: false,
             silence_paywalls: false,
             no_auto_update: false,
-            auth_route: false,
+            auto_recover: false,
         };
+        // 只有 Auth 组生效时的目标文本
+        let keep_auth: String = PATCHES
+            .iter()
+            .map(|p| if p.group == Group::Auth { p.new } else { p.old })
+            .collect();
         write_pristine(&read()); // 当前是已打状态，先按现状
         let report = apply(&f, &all_off).unwrap();
-        assert!(report
-            .iter()
-            .all(|(_, st)| *st == Status::Reverted || *st == Status::Untouched));
-        assert_eq!(read(), pristine, "撤回后应与 pristine 逐字一致");
+        assert!(report.iter().all(|(_, st)| matches!(
+            st,
+            Status::Reverted | Status::Untouched | Status::AlreadyPatched
+        )));
+        assert_eq!(read(), keep_auth, "撤回后应只剩恒开的 Auth 补丁");
+        for p in PATCHES.iter().filter(|p| p.group == Group::Auth) {
+            assert!(read().contains(p.new), "{} 应被恒开保留", p.name);
+        }
         assert!(is_patched(&f, &all_off), "全关状态下 is_patched 应为真");
 
-        // 3) 部分开关：只开图表解锁 —— 其余四组未启用，charts 打上
-        write_pristine(&read()); // 已回到 pristine
+        // 3) 部分开关：只开图表解锁 —— 其余组未启用，charts 打上
+        write_pristine(&read()); // 已回到 keep_auth
         let only_charts = Flags {
             ads_block: false,
             charts_unlock: true,
             study_on_study: false,
             silence_paywalls: false,
             no_auto_update: false,
-            auth_route: false,
+            auto_recover: false,
         };
         apply(&f, &only_charts).unwrap();
         let now = read();
         assert!(now.contains(charts.new));
-        for p in PATCHES.iter().filter(|p| p.group != Group::Charts) {
+        for p in PATCHES
+            .iter()
+            .filter(|p| p.group != Group::Charts && p.group != Group::Auth)
+        {
             assert!(!now.contains(p.new), "{} 不应被打上", p.name);
         }
         assert!(is_patched(&f, &only_charts));

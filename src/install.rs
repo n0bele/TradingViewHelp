@@ -178,9 +178,9 @@ pub struct Config {
     pub silence_paywalls: bool,
     #[serde(default = "default_true")]
     pub no_auto_update: bool,
-    /// 登录回调直达：把 --user-data-dir 写进 tradingview:// 注册
+    /// 断线自愈：连接被服务端关闭时自动点恢复 / 重载页面
     #[serde(default = "default_true")]
-    pub auth_route: bool,
+    pub auto_recover: bool,
 }
 
 impl Default for Config {
@@ -193,7 +193,7 @@ impl Default for Config {
             study_on_study: true,
             silence_paywalls: true,
             no_auto_update: true,
-            auth_route: true,
+            auto_recover: true,
         }
     }
 }
@@ -206,7 +206,7 @@ impl Config {
             study_on_study: self.study_on_study,
             silence_paywalls: self.silence_paywalls,
             no_auto_update: self.no_auto_update,
-            auth_route: self.auth_route,
+            auto_recover: self.auto_recover,
         }
     }
 }
@@ -243,6 +243,45 @@ pub fn managed_root() -> PathBuf {
 
 pub fn dest_for(src: &Install) -> PathBuf {
     managed_root().join(&src.version)
+}
+
+// ---------------------------------------------------------------- 活跃版本
+
+/// 当前锁定的托管副本版本（`~/.tvx/active-app`，一行版本号）。
+///
+/// 单独一个文件而不是塞进 `config.json`：界面每次拨开关都会用内存里的 cfg
+/// 整体覆盖 config.json，混在一起容易把刚写入的版本冲掉。
+fn active_app_path() -> PathBuf {
+    tvx_root().join("active-app")
+}
+
+pub fn active_app() -> Option<String> {
+    let s = fs::read_to_string(active_app_path()).ok()?;
+    let v = s.trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+pub fn set_active_app(version: &str) {
+    let _ = fs::create_dir_all(tvx_root());
+    let _ = fs::write(active_app_path(), format!("{version}\n"));
+}
+
+/// 版本号按**数字段**比较：3.10.1 > 3.9.7（按字符串比会反过来）。
+/// 非数字版本（custom / portable / app）解析成 [0]，永远排在最前，不会被当成"最新"。
+pub fn ver_key(v: &str) -> Vec<u64> {
+    v.split('.')
+        .map(|s| s.trim().parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+/// 在已发现的安装里找比当前副本更新的版本（客户端升级后副本仍停在旧版）。
+/// 纯计算，不碰磁盘——界面每帧调用也安全。
+pub fn newest_than<'a>(installs: &'a [Install], current: &str) -> Option<&'a Install> {
+    let cur = ver_key(current);
+    installs
+        .iter()
+        .filter(|i| ver_key(&i.version) > cur)
+        .max_by(|a, b| ver_key(&a.version).cmp(&ver_key(&b.version)))
 }
 
 // ---------------------------------------------------------------- 发现安装
@@ -370,9 +409,14 @@ fn discover_linux(out: &mut Vec<Install>) {
 
 // ---------------------------------------------------------------- 托管构建
 
+/// 找到"当前应使用"的托管副本。
+///
+/// 历史上这里是"遍历到最后一个是哪个就是哪个"，`apps/` 下同时存在两个版本目录时
+/// 返回结果取决于目录枚举顺序——可能启动到旧版本、甚至是没打补丁的那份。
+/// 现在改成确定性选择：锁定版本优先，否则取版本号最大的一份并锁定它。
 pub fn load_managed() -> Option<Managed> {
     let rd = fs::read_dir(managed_root()).ok()?;
-    let mut found: Option<Managed> = None;
+    let mut found: Vec<Managed> = Vec::new();
     for entry in rd.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
@@ -392,10 +436,24 @@ pub fn load_managed() -> Option<Managed> {
             version: name,
         };
         if m.exe().is_some() {
-            found = Some(m);
+            found.push(m);
         }
     }
-    found
+    if found.is_empty() {
+        return None;
+    }
+
+    // 1) 上次实际使用的版本优先（多版本共存时行为可预期）
+    if let Some(v) = active_app() {
+        if let Some(m) = found.iter().find(|m| m.version == v) {
+            return Some(m.clone());
+        }
+    }
+    // 2) 没有锁定记录、或锁定的目录已被删：取版本号最大的一份，并锁定
+    found.sort_by(|a, b| ver_key(&a.version).cmp(&ver_key(&b.version)));
+    let best = found.pop()?;
+    set_active_app(&best.version);
+    Some(best)
 }
 
 /// 复制 → 解包 asar → 按配置打补丁（macOS 再重签名）。失败即整体放弃。
@@ -528,6 +586,42 @@ fn copy_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 版本号必须按数字段比较：字符串比较会把 "3.10.1" 排在 "3.9.7" 前面，
+    /// 于是客户端升级后反而锁定到旧副本。
+    #[test]
+    fn version_compare_is_numeric() {
+        assert!(ver_key("3.10.1") > ver_key("3.9.7"));
+        assert!(ver_key("3.5.0.8375") > ver_key("3.5.0.999"));
+        assert!(ver_key("4.0.0") > ver_key("3.99.99"));
+        // 非数字版本（custom / portable / app）永远不被当成"最新"
+        assert!(ver_key("3.5.0.8375") > ver_key("custom"));
+        assert!(ver_key("0.0.1") > ver_key("portable"));
+    }
+
+    /// 客户端升级后要能挑出"比当前副本新"的最高版本；没有更高版本时返回 None
+    #[test]
+    fn newest_than_picks_highest_newer_install() {
+        let mk = |v: &str| Install {
+            version: v.into(),
+            kind: InstallKind::Custom,
+            root: PathBuf::from("C:/nope").join(v),
+        };
+        let all = vec![
+            mk("3.5.0.8375"),
+            mk("3.6.0.9000"),
+            mk("3.10.0.1"),
+            mk("custom"),
+        ];
+        assert_eq!(
+            newest_than(&all, "3.5.0.8375").map(|i| i.version.as_str()),
+            Some("3.10.0.1")
+        );
+        // 已经是最新：不再提示
+        assert!(newest_than(&all, "3.10.0.1").is_none());
+        // 只有非数字版本时不误报
+        assert!(newest_than(&[mk("custom"), mk("portable")], "3.5.0.8375").is_none());
+    }
 
     #[test]
     fn build_end_to_end() {
