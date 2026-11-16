@@ -7,7 +7,8 @@
 //!    轮询永远看不到事件。改用 `MenuEvent::set_event_handler` 在托盘线程里直接回调，
 //!    回调里 `ctx.request_repaint()` 把 UI 叫醒，事件经 channel 交给 update() 处理。
 //!
-//! Linux：托盘要 libappindicator 且各桌面行为不一，不启用——关闭即退出（编译期桩）。
+//! Linux：走 StatusNotifierItem（ksni，纯 Rust + D-Bus），无需 GTK/libappindicator 开发包；
+//! 桌面需提供 StatusNotifierWatcher（GNOME 需启用 AppIndicator 扩展）。
 
 // ---------------------------------------------------------------- Windows
 
@@ -358,9 +359,168 @@ mod imp {
     }
 }
 
-// ---------------------------------------------------------------- Linux 桩
+// ---------------------------------------------------------------- Linux（StatusNotifierItem）
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::sync::mpsc::{channel, Receiver, Sender};
+
+    use ksni::blocking::TrayMethods;
+    use ksni::menu::StandardItem;
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum TrayEvent {
+        Show,
+        Quit,
+    }
+
+    struct SniTray {
+        ctx: eframe::egui::Context,
+        title: String,
+        show_label: String,
+        quit_label: String,
+        events: Sender<TrayEvent>,
+        icon: Vec<ksni::Icon>,
+    }
+
+    impl ksni::Tray for SniTray {
+        fn id(&self) -> String {
+            "tvhelper".into()
+        }
+
+        fn title(&self) -> String {
+            self.title.clone()
+        }
+
+        fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+            self.icon.clone()
+        }
+
+        /// 左键点击托盘图标 = 显示主窗口
+        fn activate(&mut self, _x: i32, _y: i32) {
+            let _ = self.events.send(TrayEvent::Show);
+            self.ctx.request_repaint();
+        }
+
+        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+            vec![
+                StandardItem {
+                    label: self.show_label.clone(),
+                    activate: Box::new(|t: &mut Self| {
+                        let _ = t.events.send(TrayEvent::Show);
+                        t.ctx.request_repaint();
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                ksni::MenuItem::Separator,
+                StandardItem {
+                    label: self.quit_label.clone(),
+                    activate: Box::new(|t: &mut Self| {
+                        let _ = t.events.send(TrayEvent::Quit);
+                        t.ctx.request_repaint();
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_millis(2000));
+                            std::process::exit(0);
+                        });
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            ]
+        }
+    }
+
+    pub struct Tray {
+        events: Receiver<TrayEvent>,
+        _handle: ksni::blocking::Handle<SniTray>,
+    }
+
+    /// 是否有可用的托盘宿主（D-Bus StatusNotifierWatcher）
+    pub fn supported() -> bool {
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+    }
+
+    /// 32×32 图标：深色圆角底 + 三根 K 线柱；ARGB32 网络字节序（A,R,G,B）
+    fn make_icon() -> Vec<ksni::Icon> {
+        const S: i32 = 32;
+        let mut data = vec![0u8; (S * S * 4) as usize];
+        let bg = [0x1a, 0x1d, 0x22, 255u8];
+        let accent = [0x4c, 0x8d, 0xf6, 255u8];
+        let accent2 = [0x7a, 0xae, 0xff, 255u8];
+
+        let put = |data: &mut Vec<u8>, x: i32, y: i32, c: [u8; 4]| {
+            let i = ((y * S + x) * 4) as usize;
+            data[i] = c[3]; // A
+            data[i + 1] = c[0]; // R
+            data[i + 2] = c[1]; // G
+            data[i + 3] = c[2]; // B
+        };
+
+        for y in 0..S {
+            for x in 0..S {
+                let fx = x as f32 + 0.5;
+                let fy = y as f32 + 0.5;
+                let r = 6.0;
+                let cx = fx.clamp(r, (S as f32) - r);
+                let cy = fy.clamp(r, (S as f32) - r);
+                if ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() <= r {
+                    put(&mut data, x, y, bg);
+                }
+            }
+        }
+        for (x0, x1, top, bottom, col) in [
+            (7i32, 10i32, 18i32, 26i32, accent),
+            (14, 17, 9, 26, accent2),
+            (21, 24, 13, 22, accent),
+        ] {
+            for y in top..bottom {
+                for x in x0..x1 {
+                    put(&mut data, x, y, col);
+                }
+            }
+        }
+
+        vec![ksni::Icon {
+            width: S,
+            height: S,
+            data,
+        }]
+    }
+
+    impl Tray {
+        pub fn new(
+            ctx: eframe::egui::Context,
+            show_label: &str,
+            quit_label: &str,
+            tooltip: &str,
+        ) -> Option<Self> {
+            let (tx, rx) = channel();
+            let tray = SniTray {
+                ctx,
+                title: tooltip.to_string(),
+                show_label: show_label.to_string(),
+                quit_label: quit_label.to_string(),
+                events: tx,
+                icon: make_icon(),
+            };
+            // 没有 StatusNotifierWatcher 时 spawn 会失败 → 返回 None，退回"关闭即退出"
+            let handle = tray.spawn().ok()?;
+            Some(Self {
+                events: rx,
+                _handle: handle,
+            })
+        }
+
+        pub fn poll(&self) -> Option<TrayEvent> {
+            self.events.try_recv().ok()
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 其他平台（保持降级：无托盘）
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod imp {
     #[allow(dead_code)]
     #[derive(Clone, Copy, Debug)]
@@ -369,8 +529,11 @@ mod imp {
         Quit,
     }
 
-    /// Linux 桩：没有托盘，关闭窗口即退出。
     pub struct Tray;
+
+    pub fn supported() -> bool {
+        false
+    }
 
     impl Tray {
         pub fn new(
@@ -387,22 +550,15 @@ mod imp {
     }
 }
 
-pub use imp::{Tray, TrayEvent};
+pub use imp::{supported, Tray, TrayEvent};
 
 #[cfg(windows)]
 pub use imp::show_any_tvx_window;
-#[cfg(any(windows, target_os = "macos"))]
-pub use imp::supported;
 
-/// 非 Windows 平台没有这个兜底（Linux 无托盘、macOS 走主线程视口命令）。
+/// 非 Windows 平台没有这个兜底（Linux 走托盘事件、macOS 走主线程视口命令）。
 #[cfg(not(windows))]
 #[allow(dead_code)]
 pub fn show_main_window() {}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-pub fn supported() -> bool {
-    false
-}
 
 #[cfg(not(windows))]
 pub fn show_any_tvx_window() {}

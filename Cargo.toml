@@ -22,6 +22,10 @@ tray-icon = "0.25"
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = "0.25"
 
+# Linux 用纯 Rust 的 StatusNotifierItem 实现，避免依赖 GTK/libappindicator 开发包
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+
 [profile.release]
 opt-level = 2
 strip = true

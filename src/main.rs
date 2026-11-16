@@ -49,6 +49,17 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Linux + Wayland：winit 的 Wayland 后端 set_visible 是空实现，窗口无法隐藏，
+    // 「关闭收进托盘」会失效；有 Xwayland 时改走 X11 后端。
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some()
+        && (std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_SOCKET").is_some())
+    {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("WAYLAND_SOCKET");
+    }
+
     // 窗口标题跟随上次选择的界面语言
     let cfg = install::load_config();
     let title = cfg.lang.s().app_title.to_string();
