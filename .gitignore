@@ -25,3 +25,6 @@ Thumbs.db
 
 # ---- 临时文件 ----
 /tmp/
+
+# ---- WorkBuddy 本地项目数据（仅本机，不入库）----
+/.workbuddy/
