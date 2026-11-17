@@ -147,29 +147,46 @@ const STUDY_ON_STUDY_UNLOCK: &str = "(function(){try{var n=0;(function p(){var o
 #[cfg(test)]
 const DISCONNECT_RECOVER: &str = "(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();";
 
-/// 注入到图表页的「页内推广浮层关闭器」。
+/// 注入到图表页的「页内推广浮层拦截器」（v2：插入即拦，不再轮询）。
 ///
-/// 背景：充值/升级提示已经不再只是壳层弹窗——TradingView 现在会在图表页里
-/// 自己渲染一个推广浮层（React 弹层），壳层那四条补丁（nk / showPaywall /
-/// requestProFeature / OPEN_NEW_WINDOW 过滤）都碰不到它。
+/// 背景：充值/升级提示不是壳层弹窗——TradingView 在图表页里自己渲染 React 浮层，
+/// 壳层那四条补丁（nk / showPaywall / requestProFeature / OPEN_NEW_WINDOW 过滤）
+/// 都碰不到它。
 ///
-/// 策略：**能点关闭就点关闭；实在没有关闭按钮，才摘掉浮层节点**。
-/// 实测「在TradingView电脑版分析市场 / 立刻升级」这张推广卡（Basic → Essential）
-/// 就是没有关闭按钮的：ESC 无效、点遮罩也无效，只能重载页面或摘节点。
+/// **v1 为什么没拦住（实测复盘，勿重犯）**：
+///   1. 识别门槛要求 textContent 里出现 `TradingView`。但「更多指标，更多的交易机会」
+///      这张指标数量弹窗的正文里根本没有这个词——TradingView 只印在宣传图（位图）上，
+///      于是直接被 `!T.test(t)` 判成"不是推广"而跳过。**文案不是可靠指纹。**
+///   2. 找到"长得像关闭"的按钮就只点它、然后 `return`：按钮无效（装饰用 ×、
+///      或点了不销毁浮层）时浮层原样留着，等于什么都没做。
+///   3. 1.2 秒轮询：即使判定正确，也至少已经画出来 1 秒以上，用户看着它闪一下。
+///   4. 只查 `[role=dialog]/[class*=modal]…` 这批选择器：根节点换成别的类名、
+///      落在 shadow root 里、或整卡是个跨域 iframe 时，压根看不见。
 ///
-/// **识别不靠译文，靠不翻译的品牌词**：弹层里必须同时出现 `TradingView` 与至少两个
-/// 套餐名（Basic / Essential / Premium / Plus / Ultimate / Advanced——这些是品牌词，
-/// 任何语言都不翻译），再加上至少一个按钮。这样德语、日语、俄语等界面下同样有效，
-/// 不必为每种语言维护标题译文（`A` 里的中英文标题只作额外兜底）。
+/// **v2 的做法（提早到"插入那一刻"）**：
+///   - `MutationObserver` 监听 document 的 childList+subtree：节点一插进 DOM 就判定，
+///     回调本身是微任务，在浏览器绘制之前执行 → 判定命中时浮层**一帧都不会画出来**。
+///     不再"点关闭"，直接 `display:none !important`（不依赖浮层有没有关闭按钮）。
+///   - 识别不再要求任何语言的标题译文，只看**不翻译的结构与品牌词**，任一条命中即拦：
+///       a) 出现 ≥2 个套餐名（Basic/Essential/Premium/Ultimate/Advanced，各语言都不译）
+///          且带购买/品牌/限制语义 → 截图 1 这类"指标数量"卡就落在这条；
+///       b) 品牌词 + 购买语义 + 大尺寸媒体（video / 大图 / 大 iframe）→ 截图 2 这类推广卡；
+///       c) 购买语义 + 限制语义（limit/上限/最大…）+ 媒体或套餐名。
+///   - 跨域 iframe 兜底：任何覆盖 ≥35% 视口的 iframe 视为浮层（图表页没有这么大的正常 frame）。
+///   - shadow root：新节点带 shadowRoot 时把观察器挂进去，不靠 document 查询。
+///   - 1 秒全量扫描只作最后兜底（应对 React 复用节点、框架内部重排）。
 ///
-/// 三道保险，避免误伤功能拒绝类提示：
-///   1. 文案里出现「上限/已达到/无法/limit/reached/erreicht/limite…」时跳过（那是拒绝，不是推广）；
-///   2. 文案里出现「恢复连接/连接已关闭」时跳过（交给断线自愈处理）；
-///   3. 摘节点时向上取整层浮层，但**遇到含 canvas 的容器就停**（那是图表本体，绝不能动）。
-/// 每个浮层节点只处理一次，且 2 秒内最多处理一次，防止反复渲染时来回拉扯。
+/// **四道保险，绝不误伤**：
+///   1. 含 `<canvas>` 的子树一律跳过（图表本体）；`body`/`html`/`#root` 永不处理；
+///   2. 文案含「恢复连接/连接已关闭」跳过（交给断线自愈，那里要的是"恢复"不是"藏"）；
+///   3. 每批 DOM 变更最多判 80 个节点，避免图表高频重绘时拖慢页面；
+///   4. 只在"有按钮/链接/媒体"的子树里判定，纯文本节点与图表图元直接跳过。
+///
+/// 注意：这只是"不让它显示"。指标数量是服务端拒绝（study_limit_exceeded），
+/// 客户端没有可解除的 gate——想真正多开指标只能升级方案，这里不改变任何配额。
 /// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
 #[cfg(test)]
-const PROMO_CLOSER: &str = "(function(){try{if(window.__tvxPromo)return;window.__tvxPromo=1;var T=/TradingView/i;var L=/上限|已达到|无法|不足|超过|limit|reached|exceed|erreicht|ausgesch|limite|atteint|制限|한도|превыш|недоступ|максим/i;var U=/upgrade|pricing|升级|升級|plan/i;var A=/在 ?TradingView ?电脑版分析市场|Analyze markets in TradingView Desktop/i;var tier=/basic|essential|premium|plus|ultimate|advanced/gi;var last=0;function tiers(s){var m=s.match(tier),i,k,o={},c=0;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function closer(r){var b=r.querySelectorAll('button,[role=button],a'),i,x,al,dn,t;for(i=0;i<b.length;i++){x=b[i];al=(x.getAttribute&&x.getAttribute('aria-label'))||'';dn=(x.getAttribute&&x.getAttribute('data-name'))||'';t=(x.textContent||'').trim();if(/close|dismiss|schlie/i.test(al)||/close/i.test(dn)||/^(×|✕|✖|关闭|關閉|稍后|稍後|以后|不用了|Not now|Maybe later|Close|Schließen|Fermer|Cerrar|Chiudi|Fechar|Закрыть|閉じる|닫기|Đóng|Kapal|Fechar|Kapat)$/i.test(t))return x}return null}function hit(){var q=document.querySelectorAll('[role=dialog],dialog,[class*=modal],[class*=overlay],[class*=popup],[data-name*=dialog],[data-name*=popup]'),i,e,t,k;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxPromoDone)continue;t=(e.textContent||'').trim();if(!t||t.length>3000)continue;if(L.test(t))continue;if(!T.test(t)&&!A.test(t))continue;k=tiers(t);if(!(k>=2||(k>=1&&U.test(t))||A.test(t)))continue;if(!e.querySelector('button,[role=button],a'))continue;return e}return null}function ok(e){var r=e.getBoundingClientRect(),full=r.width>=vw()*0.95&&r.height>=vh()*0.95;if(!full)return true;if(e.querySelector&&e.querySelector('canvas'))return false;return !e.children||e.children.length<=2}function pick(n){var c=n,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(!ok(c))break;b=c;if(c.parentNode===document.body)break;c=c.parentNode}return b||n}function unlock(){try{document.documentElement.style.overflow=''}catch(e){}try{document.body.style.overflow='';document.body.style.pointerEvents=''}catch(e){}}function tick(){var d=hit();if(!d)return;var now=Date.now();if(now-last<2000)return;d.__tvxPromoDone=1;var c=closer(d);if(c){last=now;try{c.click()}catch(e){}return}var o=pick(d);last=now;try{o.style.setProperty('display','none','important')}catch(e){o.style.display='none'}o.setAttribute('data-tvx-promo-hidden','1');unlock();setTimeout(unlock,400)}setInterval(tick,1200)}catch(e){}})();";
+const PROMO_GUARD: &str = "(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|获取更多连接|关闭了这个连接|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();";
 
 /// 上一版（计数只存内存，重载即清零）。已打过的副本要先迁移到当前版本。
 /// handleDomReady 段的开头（补丁 new 与迁移文本都必须以它起头）
@@ -178,6 +195,12 @@ const DOM_READY_HEAD: &str =
 
 /// 被替换掉的原始锚点尾巴（恢复功能关闭时回退到这里）
 const OLD_RECOVER_ANCHOR: &str = "\").catch((()=>{})),this.url&&";
+
+/// 「页内推广浮层」注入段的边界：`.on("dom-ready",…executeJavaScript("` 到 `").catch((()=>{}))}))`。
+/// 脚本本体每升级一次（v1 轮询点关闭 → v2 插入即拦）文本就全变，靠 old 精确匹配必然失配，
+/// 所以和断线段一样按边界整段替换。
+const PROMO_SEG_HEAD: &str = ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"";
+const PROMO_SEG_TAIL: &str = "\").catch((()=>{}))}))";
 
 const LEGACY_RECOVER_V1: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript("(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;var n=0,last=0,waits=[15000,60000,300000];function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<600&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(/恢复连接|重新连接|Restore connection|Reconnect/i.test(t))return b[i]}return null}function tick(){var d=dlg();if(!d)return;d.setAttribute('data-tvx-recovering','1');var b=btn(d);if(b){try{b.click()}catch(e){}}setTimeout(function(){if(!dlg())return;if(n>=3)return;var now=Date.now();if(now-last<(waits[n]||3e5))return;last=now;n++;try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();").catch((()=>{})),this.url&&"#;
 
@@ -225,17 +248,17 @@ pub const PATCHES: &[Patch] = &[
         new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial)/i.test(String(n)))return;const o={url:n};",
     },
     Patch {
-        name: "页内充值浮层自动关闭",
-        name_en: "Dismiss in-page upgrade popups",
+        name: "页内推广浮层插入即拦截",
+        name_en: "Intercept in-page upgrade popups before they paint",
         group: Group::Silence,
-        // 前三条只管壳层（独立窗口 / IPC）。TradingView 后来把升级提示改成
-        // 图表页自己渲染的浮层，壳层补丁压根看不到它——这条在 tab 的 dom-ready
-        // 里注入一个轮询：按文案找到推广浮层，能点关闭就点关闭，没有关闭按钮才摘节点。
-        // 实测「在TradingView电脑版分析市场 / 立刻升级」那张卡就没有关闭按钮，
-        // ESC 与点遮罩都无效（只能重载页面），所以必须留"摘节点"这条路。
-        // 真正的功能拒绝提示（带「上限/无法」）与断线提示都会被跳过。
+        // 前三条只管壳层（独立窗口 / IPC）。TradingView 把升级提示改成了图表页自己渲染的
+        // React 浮层，壳层补丁看不到它。v1 用"1.2 秒轮询 + 文案匹配 + 点关闭"来兜，
+        // 实战漏了两张（文案里没有 TradingView 的那张指标数量卡、以及点了没用的 ×）：
+        // 判定发生在浮层已经画出来之后，本质上仍是"事后清理"。
+        // v2 改成 MutationObserver：节点插入 DOM 的微任务里就判定并隐藏，命中即不上屏；
+        // 识别只看不翻译的结构与品牌词，不再要求某种语言的标题文案。
         old: ".on(\"dom-ready\",(()=>{this.handleDomReady()}))",
-        new: ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"(function(){try{if(window.__tvxPromo)return;window.__tvxPromo=1;var T=/TradingView/i;var L=/上限|已达到|无法|不足|超过|limit|reached|exceed|erreicht|ausgesch|limite|atteint|制限|한도|превыш|недоступ|максим/i;var U=/upgrade|pricing|升级|升級|plan/i;var A=/在 ?TradingView ?电脑版分析市场|Analyze markets in TradingView Desktop/i;var tier=/basic|essential|premium|plus|ultimate|advanced/gi;var last=0;function tiers(s){var m=s.match(tier),i,k,o={},c=0;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function closer(r){var b=r.querySelectorAll('button,[role=button],a'),i,x,al,dn,t;for(i=0;i<b.length;i++){x=b[i];al=(x.getAttribute&&x.getAttribute('aria-label'))||'';dn=(x.getAttribute&&x.getAttribute('data-name'))||'';t=(x.textContent||'').trim();if(/close|dismiss|schlie/i.test(al)||/close/i.test(dn)||/^(×|✕|✖|关闭|關閉|稍后|稍後|以后|不用了|Not now|Maybe later|Close|Schließen|Fermer|Cerrar|Chiudi|Fechar|Закрыть|閉じる|닫기|Đóng|Kapal|Fechar|Kapat)$/i.test(t))return x}return null}function hit(){var q=document.querySelectorAll('[role=dialog],dialog,[class*=modal],[class*=overlay],[class*=popup],[data-name*=dialog],[data-name*=popup]'),i,e,t,k;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxPromoDone)continue;t=(e.textContent||'').trim();if(!t||t.length>3000)continue;if(L.test(t))continue;if(!T.test(t)&&!A.test(t))continue;k=tiers(t);if(!(k>=2||(k>=1&&U.test(t))||A.test(t)))continue;if(!e.querySelector('button,[role=button],a'))continue;return e}return null}function ok(e){var r=e.getBoundingClientRect(),full=r.width>=vw()*0.95&&r.height>=vh()*0.95;if(!full)return true;if(e.querySelector&&e.querySelector('canvas'))return false;return !e.children||e.children.length<=2}function pick(n){var c=n,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(!ok(c))break;b=c;if(c.parentNode===document.body)break;c=c.parentNode}return b||n}function unlock(){try{document.documentElement.style.overflow=''}catch(e){}try{document.body.style.overflow='';document.body.style.pointerEvents=''}catch(e){}}function tick(){var d=hit();if(!d)return;var now=Date.now();if(now-last<2000)return;d.__tvxPromoDone=1;var c=closer(d);if(c){last=now;try{c.click()}catch(e){}return}var o=pick(d);last=now;try{o.style.setProperty('display','none','important')}catch(e){o.style.display='none'}o.setAttribute('data-tvx-promo-hidden','1');unlock();setTimeout(unlock,400)}setInterval(tick,1200)}catch(e){}})();\").catch((()=>{}))}))",
+        new: ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|获取更多连接|关闭了这个连接|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}))}))",
     },
     Patch {
         name: "广告/追踪域名网络拦截",
@@ -366,6 +389,14 @@ fn recover_segment_range(src: &str) -> Option<(usize, usize)> {
     Some((start, start + tail + OLD_RECOVER_ANCHOR.len()))
 }
 
+/// 定位「页内推广浮层」注入段的字节区间（PROMO_SEG_HEAD … PROMO_SEG_TAIL）。
+fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
+    let start = src.find(PROMO_SEG_HEAD)?;
+    let body = start + PROMO_SEG_HEAD.len();
+    let tail = src[body..].find(PROMO_SEG_TAIL)?;
+    Some((start, body + tail + PROMO_SEG_TAIL.len()))
+}
+
 /// 按开关对解包后的 index.js 应用/撤回补丁。任一处匹配数不为 1 就整体失败，
 /// 避免"打了一半"的半残状态。
 ///
@@ -422,6 +453,22 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
                 "{}：handleDomReady 段期望 1 处，实际 {n} 处",
                 p.name
             )),
+        }
+    }
+
+    // 0c) 「页内推广浮层」同样按段迁移：v1（文案门 + 点关闭 + 1.2 秒轮询）与 v2
+    //     （MutationObserver 插入即拦）文本完全不同，靠 old 精确匹配会失配，
+    //     还会把已装好的副本判成"锚点未命中"。这里整段换成当前版本。
+    if let Some(p) = PATCHES.iter().find(|p| p.new.contains("__tvxGuard")) {
+        if let Some((s, e)) = promo_segment_range(&src) {
+            let stale = {
+                let seg = &src[s..e];
+                seg != p.old && seg != p.new
+            };
+            if stale {
+                let target = if p.group.enabled(flags) { p.new } else { p.old };
+                src.replace_range(s..e, target);
+            }
         }
     }
 
@@ -568,22 +615,28 @@ mod tests {
     }
 
     #[test]
-    fn promo_closer_injection_matches_const() {
+    fn promo_guard_injection_matches_const() {
         // 页内推广浮层脚本必须与常量逐字一致（常量只用于漂移检查），
         // 同样不得出现双引号：整串嵌在 executeJavaScript("…") 里。
         let p = PATCHES
             .iter()
-            .find(|p| p.new.contains("__tvxPromo"))
+            .find(|p| p.new.contains("__tvxGuard"))
             .expect("页内推广浮层补丁应在补丁集里");
-        assert!(p.new.contains(PROMO_CLOSER));
-        assert!(!PROMO_CLOSER.contains('"'));
-        // 这个弹层没有关闭按钮，不能要求"没有按钮就什么都不做"
-        assert!(PROMO_CLOSER.contains("data-tvx-promo-hidden"));
+        assert!(p.new.contains(PROMO_GUARD));
+        assert!(!PROMO_GUARD.contains('"'));
+        // v2 的核心：插入即判定（微任务里隐藏），不再等轮询
+        assert!(PROMO_GUARD.contains("new MutationObserver"));
+        assert!(PROMO_GUARD.contains("subtree:!0"));
+        assert!(!PROMO_GUARD.contains(".click("), "v2 不再点按钮：点了没用的 × 是 v1 的漏点");
+        // 识别不依赖任何一种语言的标题，也不依赖 TradingView 这个词
+        assert!(PROMO_GUARD.contains("var TIER=/basic|essential|premium|ultimate|advanced/gi"));
+        assert!(PROMO_GUARD.contains("if(k>=2&&(buy||br||lim))return 1"));
         // 摘节点时必须避开含 canvas 的容器（图表本体）
-        assert!(PROMO_CLOSER.contains("querySelector('canvas')"));
-        // 识别必须落在"不翻译的品牌词"上：TradingView + 套餐名，而不是某种语言的标题
-        assert!(PROMO_CLOSER.contains("var T=/TradingView/i"));
-        assert!(PROMO_CLOSER.contains("var tier=/basic|essential|premium|plus|ultimate|advanced/gi"));
+        assert!(PROMO_GUARD.contains("querySelector('canvas')"));
+        assert!(PROMO_GUARD.contains("if(hasChart(e))return"));
+        // 断线提示交给自愈，不能被当推广藏掉
+        assert!(PROMO_GUARD.contains("恢复连接"));
+        assert!(PROMO_GUARD.contains("if(DIS.test(t))return 0"));
     }
 
     /// 历史注入文本（只隐藏版 / 只存内存计数的 v1）：apply() 必须能就地升级成当前脚本，
@@ -654,6 +707,55 @@ mod tests {
             Status::AlreadyPatched | Status::Untouched
         )));
         assert_eq!(fs::read_to_string(&f).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// v1（文案门 + 点关闭 + 轮询）→ v2（插入即拦）：已装好的副本里是 v1 文本，
+    /// apply() 必须整段换掉，而不是报"锚点失配"——否则用户升级助手后还是要手工删副本。
+    #[test]
+    fn stale_promo_segment_is_migrated_whole() {
+        let dir = std::env::temp_dir().join("tvx-patch-stale-promo-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("index.js");
+
+        let p = PATCHES
+            .iter()
+            .find(|q| q.new.contains("__tvxGuard"))
+            .expect("页内推广浮层补丁应在补丁集里");
+        // 模拟 v1：同一个注入位置，脚本本体是旧版标记
+        let stale = p.new.replace("window.__tvxGuard=1", "window.__tvxPromo=1");
+        assert_ne!(stale, p.new, "模拟的历史脚本不能与当前脚本相同");
+
+        let src: String = PATCHES
+            .iter()
+            .map(|q| {
+                if q.new.contains("__tvxGuard") {
+                    stale.as_str()
+                } else {
+                    q.new
+                }
+            })
+            .collect();
+        fs::write(&f, &src).unwrap();
+
+        apply(&f, &Flags::default()).unwrap();
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(!after.contains("__tvxPromo"), "v1 脚本应被整段换掉");
+        assert!(after.contains("__tvxGuard"), "应迁移成 v2");
+        assert_eq!(after.matches(PROMO_SEG_HEAD).count(), 1, "注入段必须只有一处");
+        assert_eq!(after.matches(PROMO_SEG_TAIL).count(), 1, "注入段尾巴必须只有一处");
+        assert!(is_patched(&f, &Flags::default()));
+
+        // 关掉「屏蔽充值弹窗」：整段回退成原始锚点
+        let off = Flags {
+            silence_paywalls: false,
+            ..Flags::default()
+        };
+        apply(&f, &off).unwrap();
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(!after.contains("__tvxGuard"), "关掉后不应留注入");
+        assert!(after.contains(p.old), "关掉后应回到原始 dom-ready 锚点");
 
         let _ = fs::remove_dir_all(&dir);
     }
