@@ -162,6 +162,7 @@ fn default_true() -> bool {
 /// 拦截广告网络 / 多图表解锁 / 指标叠加解锁 / 禁用自动更新 各自独立；
 /// 指标数量 / 布局保存 / 警报由服务端强制（实测拒绝码由服务端下发，
 /// 客户端无法解除），只能静音其升级弹窗，故共用 `silence_paywalls` 一个开关。
+/// `alerts` 是本地指标报警，与服务端报警配额无关，单独一个开关。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -181,6 +182,9 @@ pub struct Config {
     /// 断线自愈：连接被服务端关闭时自动点恢复 / 重载页面
     #[serde(default = "default_true")]
     pub auto_recover: bool,
+    /// 本地指标报警：图表页里的报警设置页 + 指标条件判断，命中后系统通知 / 邮件
+    #[serde(default = "default_true")]
+    pub alerts: bool,
 }
 
 impl Default for Config {
@@ -194,6 +198,7 @@ impl Default for Config {
             silence_paywalls: true,
             no_auto_update: true,
             auto_recover: true,
+            alerts: true,
         }
     }
 }
@@ -207,6 +212,7 @@ impl Config {
             silence_paywalls: self.silence_paywalls,
             no_auto_update: self.no_auto_update,
             auto_recover: self.auto_recover,
+            alerts: self.alerts,
         }
     }
 }
@@ -521,6 +527,8 @@ pub fn build(
         };
         log(format!("  [{}] {shown}", st.mark()));
     }
+    // 报警功能是「文件 + 一处 require」，不只改 index.js，所以补丁之后还要落资源
+    patch::install_assets(&app_dir, flags)?;
 
     resign_if_needed(&app, lang, log)?;
 

@@ -4,6 +4,9 @@
 //! 指标数量 / 布局保存 / 警报数量等限制由服务端强制（实测：指标走服务端拒绝码
 //! `study_limit_exceeded`，警报提交走 REST `createAlert`、拒绝码
 //! `total_alerts_count_exceeded` 等），客户端无法解除拒绝——只能屏蔽其充值窗口。
+//! 「本地指标报警」(Group::Alerts) 是另一条路：不提交服务端报警，而是在图表页读
+//! 图表自己算出的指标值做条件判断，命中后由主进程发本机通知/邮件；不占用也不绕过
+//! 服务端报警配额，代价是软件关闭即停止监控。
 //! 多图表布局的图表数量 gate 在客户端（实测 `_exposed_chartWidgetCollection`
 //! 上的 `_checkProFeature`/`_planChartsLimit`，free 档实测 limit=1），可注入解除；
 //! 指标叠加（STUDY_ON_STUDY）的子指标上限同样 gate 在客户端：CDP 实测
@@ -38,6 +41,9 @@ pub struct Flags {
     pub no_auto_update: bool,
     /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
     pub auto_recover: bool,
+    /// 本地指标报警：图表页注入报警引擎（设置页 + 指标条件求值），
+    /// 命中后由主进程发系统通知 / 邮件。不涉及服务端报警配额。
+    pub alerts: bool,
 }
 
 impl Default for Flags {
@@ -49,6 +55,7 @@ impl Default for Flags {
             silence_paywalls: true,
             no_auto_update: true,
             auto_recover: true,
+            alerts: true,
         }
     }
 }
@@ -73,6 +80,8 @@ pub enum Group {
     Auth,
     /// 断线自愈（服务端踢连接后自动恢复，不改配额）
     Recover,
+    /// 本地指标报警（页内引擎 + 设置页 + 主进程通知）
+    Alerts,
 }
 
 impl Group {
@@ -85,6 +94,7 @@ impl Group {
             Group::NoAutoUpdate => f.no_auto_update,
             Group::Auth => true,
             Group::Recover => f.auto_recover,
+            Group::Alerts => f.alerts,
         }
     }
 }
@@ -355,6 +365,18 @@ pub const PATCHES: &[Patch] = &[
         old: "(0,M.j9)()||tp().checkForUpdates()",
         new: "(0,M.j9)()||!0||tp().checkForUpdates()",
     },
+    Patch {
+        name: "本地指标报警引擎",
+        name_en: "Local indicator alerts",
+        group: Group::Alerts,
+        // 报警引擎（图表页脚本）、设置页、主进程通知/邮件模块都放在 app 目录里，
+        // 由 install_assets() 写入（见 alerts-engine.js / alerts-main.js）。
+        // index.js 只负责把主进程模块挂上。锚点是 bundle 末尾的 sourceMappingURL 注释：
+        // 用 `//#` 注释本身做 old、替换成 require（注释丢弃），这样 new 不含 old，
+        // 重复 apply 不会叠加，撤回时注释原样还原。
+        old: "//# sourceMappingURL=index.js.map",
+        new: ";(function(){try{require(\"./tvx-alerts-main.js\")}catch(e){console.error(\"[tvx-alerts]\",e)}})();\n/* sourceMappingURL removed by tvhelper (local alerts module appended) */",
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -517,6 +539,63 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
     fs::write(index_js, src.as_bytes())
         .with_context(|| format!("写回 {}", index_js.display()))?;
     Ok(report)
+}
+
+/// 图表页报警引擎（设置页 + 条件求值）：作为真实 JS 文件随程序分发，
+/// 编译期嵌入，运行时写到 app 目录，由主进程读出来 executeJavaScript。
+const ALERTS_ENGINE_JS: &str = include_str!("alerts-engine.js");
+
+/// 主进程侧报警模块：IPC、配置持久化、系统通知、SMTP。
+const ALERTS_MAIN_JS: &str = include_str!("alerts-main.js");
+
+const PRELOAD_BRIDGE_MARK: &str = "/*tvx-alerts-bridge*/";
+
+/// 追加到 platform-preload.js 末尾的桥：把主进程的报警 IPC 暴露给图表页。
+/// preload 里 `process.contextIsolated` 为真（实测），所以必须走 contextBridge。
+const PRELOAD_BRIDGE: &str = "\n;(function(){/*tvx-alerts-bridge*/try{var e=require(\"electron\");if(!e||!e.contextBridge||!e.ipcRenderer)return;e.contextBridge.exposeInMainWorld(\"__TVX_ALERTS__\",{get:function(){return e.ipcRenderer.invoke(\"tvx-alerts:get\")},save:function(c){return e.ipcRenderer.invoke(\"tvx-alerts:save\",c)},state:function(s){return e.ipcRenderer.invoke(\"tvx-alerts:state\",s)},fire:function(p){return e.ipcRenderer.invoke(\"tvx-alerts:fire\",p)},test:function(k){return e.ipcRenderer.invoke(\"tvx-alerts:test\",k)}})}catch(err){console.error(\"[tvx-alerts-bridge]\",err)}})();\n";
+
+/// 把报警功能所需的文件落到托管副本里（开关打开时写入，关闭时清掉）。
+///
+/// 这三个文件与 index.js 里那条 `require("./tvx-alerts-main.js")` 一起构成完整功能：
+/// - tvx-alerts-engine.js：图表页脚本（设置页 UI + 指标条件求值）
+/// - tvx-alerts-main.js：主进程模块（IPC / 持久化 / 通知 / 邮件）
+/// - preload/platform-preload.js 末尾的桥（幂等追加，可按标记整段撤回）
+///
+/// 关闭开关时全部移除，副本回到"没有报警功能"的干净状态。
+pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<()> {
+    let engine = app_dir.join("tvx-alerts-engine.js");
+    let main = app_dir.join("tvx-alerts-main.js");
+    let preload = app_dir.join("preload").join("platform-preload.js");
+
+    if flags.alerts {
+        fs::write(&engine, ALERTS_ENGINE_JS)
+            .with_context(|| format!("写入 {}", engine.display()))?;
+        fs::write(&main, ALERTS_MAIN_JS).with_context(|| format!("写入 {}", main.display()))?;
+
+        if preload.is_file() {
+            let src = fs::read_to_string(&preload)
+                .with_context(|| format!("读取 {}", preload.display()))?;
+            if !src.contains(PRELOAD_BRIDGE_MARK) {
+                let mut out = src;
+                out.push_str(PRELOAD_BRIDGE);
+                fs::write(&preload, out)
+                    .with_context(|| format!("写入 {}", preload.display()))?;
+            }
+        }
+        return Ok(());
+    }
+
+    let _ = fs::remove_file(&engine);
+    let _ = fs::remove_file(&main);
+    if preload.is_file() {
+        let src = fs::read_to_string(&preload)
+            .with_context(|| format!("读取 {}", preload.display()))?;
+        if src.contains(PRELOAD_BRIDGE) {
+            fs::write(&preload, src.replacen(PRELOAD_BRIDGE, "", 1))
+                .with_context(|| format!("写入 {}", preload.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// 检查 index.js 是否处于"当前开关组合所要求"的已打补丁状态：
@@ -856,6 +935,7 @@ mod tests {
             silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
+            alerts: false,
         };
         // 只有 Auth 组生效时的目标文本
         let keep_auth: String = PATCHES
@@ -883,6 +963,7 @@ mod tests {
             silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
+            alerts: false,
         };
         apply(&f, &only_charts).unwrap();
         let now = read();
@@ -905,5 +986,61 @@ mod tests {
         assert_eq!(read(), before);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 报警功能的资源文件：开关打开时落盘、关闭时清干净、preload 桥幂等可逆。
+    #[test]
+    fn alerts_assets_are_written_and_removed() {
+        let dir = std::env::temp_dir().join("tvx-alerts-assets-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("preload")).unwrap();
+        let preload = dir.join("preload").join("platform-preload.js");
+        fs::write(&preload, "console.log('x');\n").unwrap();
+
+        let on = Flags::default();
+        install_assets(&dir, &on).unwrap();
+        assert!(dir.join("tvx-alerts-engine.js").is_file(), "引擎脚本应落盘");
+        assert!(dir.join("tvx-alerts-main.js").is_file(), "主进程模块应落盘");
+        let p = fs::read_to_string(&preload).unwrap();
+        assert_eq!(p.matches(PRELOAD_BRIDGE_MARK).count(), 1, "桥只应追加一次");
+        assert!(p.contains("__TVX_ALERTS__"));
+
+        // 幂等：重跑不应再追加一份桥
+        install_assets(&dir, &on).unwrap();
+        let p2 = fs::read_to_string(&preload).unwrap();
+        assert_eq!(p2.matches(PRELOAD_BRIDGE_MARK).count(), 1);
+        assert_eq!(p2, p, "重复执行不应改动 preload");
+
+        let off = Flags {
+            alerts: false,
+            ..Flags::default()
+        };
+        install_assets(&dir, &off).unwrap();
+        assert!(!dir.join("tvx-alerts-engine.js").exists(), "关闭后引擎脚本应删除");
+        assert!(!dir.join("tvx-alerts-main.js").exists(), "关闭后主进程模块应删除");
+        let p3 = fs::read_to_string(&preload).unwrap();
+        assert!(!p3.contains(PRELOAD_BRIDGE_MARK), "关闭后桥应撤回");
+        assert_eq!(p3, "console.log('x');\n", "撤回后应逐字还原");
+
+        // 再打开：能从关闭态恢复
+        install_assets(&dir, &on).unwrap();
+        assert!(fs::read_to_string(&preload)
+            .unwrap()
+            .contains(PRELOAD_BRIDGE_MARK));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 两个 JS 资源的基本形态：引擎走 executeJavaScript（必须自执行），
+    /// 主进程模块必须注册 IPC 处理器。
+    #[test]
+    fn alerts_bundles_look_valid() {
+        assert!(ALERTS_ENGINE_JS.contains("__TVX_ALERTS__"), "引擎要认 preload 桥");
+        assert!(ALERTS_ENGINE_JS.contains("getAllStudies"), "引擎按图表指标列表配置");
+        assert!(ALERTS_ENGINE_JS.contains("__tvxAlerts"), "引擎必须防重复注入");
+        assert!(ALERTS_MAIN_JS.contains("ipcMain.handle"), "主进程模块要注册 IPC");
+        assert!(ALERTS_MAIN_JS.contains("tvx-alerts:fire"), "触发通道名要固定");
+        assert!(ALERTS_MAIN_JS.contains("executeJavaScript"), "主进程负责注入引擎");
+        assert!(!ALERTS_MAIN_JS.contains("process.exit"), "主进程模块不得退出进程");
     }
 }

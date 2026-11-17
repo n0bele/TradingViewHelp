@@ -49,6 +49,12 @@ pub fn reapply_headless() {
                 };
                 println!("[{}] {shown}", st.mark());
             }
+            // 报警功能的资源文件（引擎 / 主进程模块 / preload 桥）随开关一起落盘或清除
+            if let Some(dir) = m.index_js().parent() {
+                if let Err(e) = patch::install_assets(dir, &cfg.flags()) {
+                    eprintln!("✗ 报警资源写入失败：{e:#}");
+                }
+            }
             println!(
                 "{}",
                 lang.log_reapplied_headless(&m.index_js().display().to_string())
@@ -720,6 +726,9 @@ impl App {
                     false,
                     Box::new(move |push| {
                         let report = patch::apply(&m.index_js(), &flags)?;
+                        if let Some(dir) = m.index_js().parent() {
+                            patch::install_assets(dir, &flags)?;
+                        }
                         push(lang.log_switches(
                             flags.ads_block,
                             flags.charts_unlock,
@@ -1076,6 +1085,13 @@ impl eframe::App for App {
                 if ui
                     .checkbox(&mut self.cfg.auto_recover, t.cb_recover)
                     .on_hover_text(t.cb_recover_hint)
+                    .changed()
+                {
+                    toggled = true;
+                }
+                if ui
+                    .checkbox(&mut self.cfg.alerts, t.cb_alerts)
+                    .on_hover_text(t.cb_alerts_hint)
                     .changed()
                 {
                     toggled = true;
