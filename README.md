@@ -42,6 +42,12 @@ cargo build --release
 2. 运行程序，「添加账号」→ 填名字 → 「启动」。
 3. 在弹出的 TradingView 窗口里登录；切换账号直接启动另一个即可。
 
+## 交流群
+
+TVHelp 交流群，可加作者微信：
+
+<img src="assets/wechat-qr.png" width="240" alt="作者微信二维码" />
+
 ## 免责声明
 
 - 非官方工具，与 TradingView, Inc. 无关联；TradingView 名称与商标归其权利人所有。
