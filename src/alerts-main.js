@@ -42,6 +42,11 @@ function cfgPath() {
   return path.join(app.getPath('userData'), 'tvx-alerts.json');
 }
 
+/** 指标条件自检转储：用来核对脚本声明了哪些 alertcondition、客户端读到了哪些列 */
+function dumpPath() {
+  return path.join(app.getPath('userData'), 'tvx-alerts-study-dump.json');
+}
+
 function logPath() {
   return path.join(app.getPath('userData'), 'tvx-alerts.log');
 }
@@ -350,6 +355,18 @@ ipcMain.handle('tvx-alerts:save', (e, cfg) => {
     if (!cfg || typeof cfg !== 'object') return { ok: false, error: '配置格式不对' };
     writeConfig(cfg);
     return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+// 指标条件自检：把引擎读到的 metainfo（plots / alertcondition 名字 / 数据列）落到文件，便于核对
+ipcMain.handle('tvx-alerts:dump', (e, data) => {
+  try {
+    const p = dumpPath();
+    fs.writeFileSync(p, JSON.stringify({ at: new Date().toISOString(), data }, null, 1), 'utf8');
+    log('[dump] ' + p);
+    return { ok: true, path: p };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
