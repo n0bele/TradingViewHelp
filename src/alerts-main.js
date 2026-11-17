@@ -66,6 +66,12 @@ function normalize(cfg) {
     if (typeof a.cooldownMin !== 'number') a.cooldownMin = 0;
     if (typeof a.lastFiredAt !== 'number') a.lastFiredAt = 0;
     if (typeof a.lastBarTime !== 'number') a.lastBarTime = 0;
+    // 消息模板（v2 新增）：标题/正文可自定义，支持 {{ticker}} 等占位符
+    if (typeof a.msgTitle !== 'string') a.msgTitle = '';
+    if (typeof a.msgBody !== 'string') a.msgBody = '';
+    // 邮件发件人/收件人可按报警覆盖全局默认值
+    if (typeof a.emailFrom !== 'string') a.emailFrom = '';
+    if (typeof a.emailTo !== 'string') a.emailTo = '';
   });
   return c;
 }
@@ -85,6 +91,11 @@ function writeConfig(cfg) {
   fs.renameSync(tmp, p);
 }
 
+function parseList(v) {
+  if (Array.isArray(v)) return v.map((s) => String(s).trim()).filter(Boolean);
+  return String(v || '').split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+}
+
 function fmtNum(v) {
   if (typeof v !== 'number' || !isFinite(v)) return '-';
   const abs = Math.abs(v);
@@ -94,6 +105,7 @@ function fmtNum(v) {
 }
 
 function emailSubject(p) {
+  if (p.title) return p.title;
   const cond = COND_LABEL[p.condition] || p.condition || '';
   const target = p.condition === 'in_range' || p.condition === 'out_range'
     ? fmtNum(p.threshold) + '~' + fmtNum(p.threshold2)
@@ -103,6 +115,8 @@ function emailSubject(p) {
 }
 
 function emailBody(p) {
+  // 图表页已经按用户模板替换好占位符了，直接用；没有模板才回退到结构化正文
+  if (p.body) return p.body;
   return [
     'TradingView 指标报警',
     '',
@@ -380,8 +394,13 @@ ipcMain.handle('tvx-alerts:fire', async (e, p) => {
       if (!cfg.email || !cfg.email.host) {
         errors.push('邮件：还没有配置 SMTP');
       } else {
+        // 单条报警可以覆盖发件人/收件人；没填就用「通知设置」里的默认值
+        const mail = Object.assign({}, cfg.email);
+        if (p.emailFrom) mail.from = String(p.emailFrom).trim();
+        const to = parseList(p.emailTo);
+        if (to.length) mail.to = to;
         try {
-          await sendMail(cfg.email, emailSubject(p), emailBody(p));
+          await sendMail(mail, emailSubject(p), emailBody(p));
           delivered.push('email');
         } catch (err) {
           errors.push('邮件：' + String((err && err.message) || err));

@@ -4,14 +4,17 @@
  * 设计约束（来自需求）：
  *   1. 只做「指标报警」，不做价格报警；
  *   2. 条件必须绑定在「当前图表标签」上：品种 + 周期 + 该图上真实存在的指标（含参数）；
- *   3. 通知走系统弹窗和/或邮件，两个通道都要能单独开关、能单独测试；
- *   4. 设置持久化，重启后自动恢复；如果图表不存在 / 品种周期不符 / 指标不在图上，
+ *   3. 设置页结构对齐 TradingView 原生报警对话框：条件 / 周期与触发 / 消息 / 通知；
+ *   4. 消息支持占位符（{{ticker}} {{open}} {{close}} ...），标题与内容都可自定义；
+ *   5. 通知走系统弹窗和/或邮件，邮件可按报警覆盖发件人与收件人；
+ *   6. 设置持久化，重启后自动恢复；如果图表不存在 / 品种周期不符 / 指标不在图上，
  *      只标记「未就绪」，绝不硬触发。
  *
  * 数据全部来自图表自身的模型（实测于 3.5.0.8375）：
  *   window.TradingViewApi.activeChart()             → symbol() / resolution() / getAllStudies()
  *   chart.getStudyById(id)._study.data()            → PlotList，valueAt(i) = [time, plot0, plot1, ...]
  *   study._valuesProvider.getValues()               → [{index, title, visible}]，用于曲线命名
+ *   chart._chartWidget.model().mainSeries().bars()  → PlotList，valueAt(i) = [time, open, high, low, close, volume]
  * 注意 PlotList 的 size() 含左侧填充，必须用 lastIndex() 取最后一根。
  */
 (function () {
@@ -28,6 +31,7 @@
   var RUNTIME = Object.create(null); // alertId -> {bar, firedForBar, status, value}
   var UI = null;
   var BANNER_TIMER = 0;
+  var HOT_TIMER = 0;
 
   var CONDS = [
     { id: 'cross_up', label: '上穿' },
@@ -37,6 +41,15 @@
     { id: 'in_range', label: '进入区间' },
     { id: 'out_range', label: '离开区间' }
   ];
+
+  // 占位符清单（顺序即设置页里按钮的排列顺序）
+  var PLACEHOLDERS = [
+    'ticker', 'interval', 'open', 'high', 'low', 'close', 'volume',
+    'time', 'study', 'plot', 'condition', 'threshold', 'value'
+  ];
+
+  var DEFAULT_TITLE = '{{ticker}} {{interval}} · {{study}} 报警';
+  var DEFAULT_BODY = '{{ticker}} {{interval}} {{study}} · {{plot}} {{condition}} {{threshold}}\n当前 {{close}}（开 {{open}} 高 {{high}} 低 {{low}}）';
 
   function condLabel(id) {
     for (var i = 0; i < CONDS.length; i++) if (CONDS[i].id === id) return CONDS[i].label;
@@ -73,6 +86,29 @@
       if (d && typeof d.valueAt === 'function' && typeof d.lastIndex === 'function') return d;
     } catch (e) {}
     return null;
+  }
+
+  /** 主序列最后一根 K 线：{time, open, high, low, close, volume} */
+  function mainBar(ctx) {
+    if (!ctx) return null;
+    try {
+      var a = ctx.a;
+      var model = a._chartWidget && typeof a._chartWidget.model === 'function' ? a._chartWidget.model() : null;
+      var ms = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
+      var b = ms && typeof ms.bars === 'function' ? ms.bars() : null;
+      if (!b && typeof a.getSeries === 'function') {
+        var s = a.getSeries();
+        b = s && typeof s.bars === 'function' ? s.bars() : null;
+      }
+      if (!b) return null;
+      var i = typeof b.lastIndex === 'function' ? b.lastIndex() : -1;
+      if (i < 0) return null;
+      var v = typeof b.valueAt === 'function' ? b.valueAt(i) : null;
+      if (!v || typeof v[0] !== 'number') return null;
+      return { time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] };
+    } catch (e) {
+      return null;
+    }
   }
 
   function studyMeta(a) {
@@ -234,7 +270,7 @@
     return BR.save(CFG).then(function (r) { return !!(r && r.ok); }).catch(function () { return false; });
   }
 
-  // ---------------------------------------------------------------- 触发
+  // ---------------------------------------------------------------- 消息模板
 
   function fmtNum(v) {
     if (typeof v !== 'number' || !isFinite(v)) return '-';
@@ -244,21 +280,61 @@
     return v.toFixed(4);
   }
 
-  function describe(al) {
-    var t = al.condition === 'in_range' || al.condition === 'out_range'
+  function rangeText(al) {
+    return al.condition === 'in_range' || al.condition === 'out_range'
       ? fmtNum(al.value) + ' ~ ' + fmtNum(al.value2)
       : fmtNum(al.value);
-    return (al.plotTitle || '指标') + ' ' + condLabel(al.condition) + ' ' + t;
   }
 
-  function fire(al, ctx, cur, barTime) {
+  function describe(al) {
+    return (al.plotTitle || '指标') + ' ' + condLabel(al.condition) + ' ' + rangeText(al);
+  }
+
+  /** 占位符取值表；键全部小写，未命中占位符原样保留（方便用户发现拼错） */
+  function msgVars(ctx, al, plotTitle, cur) {
+    var sym = String((ctx && ctx.symbol) || al.symbol || '');
+    var parts = sym.split(':');
+    var bar = mainBar(ctx);
+    var v = {
+      ticker: parts.length > 1 ? parts[parts.length - 1] : sym,
+      symbol: sym,
+      exchange: parts.length > 1 ? parts[0] : '',
+      interval: String((ctx && ctx.resolution) || al.resolution || ''),
+      study: al.studyName || '',
+      plot: plotTitle || al.plotTitle || '',
+      condition: condLabel(al.condition),
+      threshold: rangeText(al),
+      value: fmtNum(cur),
+      time: bar ? new Date(bar.time * 1000).toLocaleString() : '',
+      timenow: new Date().toLocaleString()
+    };
+    if (bar) {
+      v.open = fmtNum(bar.open);
+      v.high = fmtNum(bar.high);
+      v.low = fmtNum(bar.low);
+      v.close = fmtNum(bar.close);
+      v.volume = fmtNum(bar.volume);
+    }
+    return v;
+  }
+
+  function renderTemplate(tpl, vars) {
+    if (!tpl) return '';
+    return String(tpl).replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, function (m, k) {
+      var key = String(k).toLowerCase();
+      return Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key] == null ? '' : vars[key]) : m;
+    });
+  }
+
+  // ---------------------------------------------------------------- 触发
+
+  function fire(al, ctx, cur, barTime, plotTitle) {
     var now = Date.now();
-    var title = 'TradingView 指标报警';
-    var body = [
-      al.symbol + ' · ' + al.resolution,
-      (al.studyName || '') + '（' + (al.plotTitle || '') + '）= ' + fmtNum(cur),
-      '条件：' + describe(al)
-    ].join('\n');
+    var vars = msgVars(ctx, al, plotTitle, cur);
+    var title = renderTemplate(al.msgTitle || DEFAULT_TITLE, vars) || 'TradingView 指标报警';
+    var body = renderTemplate(al.msgBody || DEFAULT_BODY, vars) ||
+      (al.symbol + ' · ' + al.resolution + '\n' + describe(al));
+
     var payload = {
       alertId: al.id,
       title: title,
@@ -266,24 +342,27 @@
       symbol: al.symbol,
       resolution: al.resolution,
       study: al.studyName,
-      plot: al.plotTitle,
+      plot: vars.plot,
       condition: al.condition,
       value: cur,
       threshold: al.value,
       threshold2: al.value2,
       barTime: barTime,
-      notify: Array.isArray(al.notify) && al.notify.length ? al.notify : ['system']
+      notify: Array.isArray(al.notify) && al.notify.length ? al.notify : ['system'],
+      emailFrom: al.emailFrom || '',
+      emailTo: al.emailTo || ''
     };
     al.lastFiredAt = now;
     al.lastBarTime = barTime;
-    showBanner(body);
+    showBanner(title + '\n' + body);
     var st = state(al.id);
     st.status = '已触发 ' + new Date(now).toLocaleTimeString();
     st.value = cur;
+    flash();
     BR.fire(payload).then(function (r) {
-      if (r && r.errors && r.errors.length) showBanner(body + '\n通知失败：' + r.errors.join('；'), true);
+      if (r && r.errors && r.errors.length) showBanner(title + '\n通知失败：' + r.errors.join('；'), true);
     }).catch(function (e) {
-      showBanner(body + '\n通知失败：' + (e && e.message ? e.message : '未知错误'), true);
+      showBanner(title + '\n通知失败：' + (e && e.message ? e.message : '未知错误'), true);
     });
     BR.state({ id: al.id, lastFiredAt: al.lastFiredAt, lastBarTime: barTime }).catch(function () {});
     // 这里不整份回写配置：多个图表标签共用同一份配置，整份覆盖会吞掉别的标签页刚加的报警。
@@ -293,6 +372,7 @@
   // ---------------------------------------------------------------- 主循环
 
   function tick() {
+    ensureToolbarButton();
     if (!CFG || !CFG.alerts.length) { pulse(); return; }
     var ctx = chartCtx();
     if (!ctx) { pulse(); return; }
@@ -324,17 +404,31 @@
         continue;
       }
       rt.firedForBar = true;
-      fire(al, ctx, cur, ser.time);
+      var plot = r.study.plots[al.plotIndex];
+      fire(al, ctx, cur, ser.time, plot ? plot.title : al.plotTitle);
       if (al.once) { al.enabled = false; dirty = true; }
     }
     if (dirty) saveConfig();
     pulse();
   }
 
+  function armedCount() {
+    if (!CFG) return 0;
+    var n = 0;
+    for (var i = 0; i < CFG.alerts.length; i++) if (CFG.alerts[i].enabled) n++;
+    return n;
+  }
+
   function pulse() {
     if (!UI) return;
-    var armed = CFG ? CFG.alerts.filter(function (a) { return a.enabled; }).length : 0;
-    UI.pill.textContent = armed ? '报警 ' + armed : '报警';
+    var n = armedCount();
+    UI.pillLabel.textContent = n ? '报警 ' + n : '报警';
+    UI.pillCount.textContent = n ? String(n) : '';
+    UI.pillCount.style.display = n ? 'inline-block' : 'none';
+    if (UI.toolBadge) {
+      UI.toolBadge.textContent = n ? String(n) : '';
+      UI.toolBadge.style.display = n ? 'block' : 'none';
+    }
     // 只就地刷新状态徽标，不重建列表（否则会打断点击/滚动）
     if (UI.open && UI.tab === 'list' && UI.rows) {
       UI.rows.forEach(function (ref) {
@@ -348,12 +442,25 @@
         var bits = [];
         if (rt.value != null) bits.push('当前值 ' + fmtNum(rt.value));
         if (al.lastFiredAt) bits.push('上次触发 ' + new Date(al.lastFiredAt).toLocaleString());
-        if (al.cooldownMin > 0) bits.push('冷却 ' + al.cooldownMin + ' 分钟');
-        if (al.once) bits.push('只触发一次');
-        bits.push('通知：' + ((al.notify || []).indexOf('email') >= 0 ? '系统+邮件' : '系统'));
+        if (al.notify && al.notify.indexOf('email') >= 0) bits.push('系统+邮件');
+        else bits.push('仅系统');
         ref.line.textContent = bits.join(' · ');
       });
     }
+  }
+
+  function flash() {
+    if (!UI) return;
+    var nodes = [UI.pill, UI.toolBtn];
+    nodes.forEach(function (n) {
+      if (!n) return;
+      n.classList.add('tvxa-hot');
+      setTimeout(function () { n.classList.remove('tvxa-hot'); }, 3000);
+    });
+    clearTimeout(HOT_TIMER);
+    HOT_TIMER = setTimeout(function () {
+      if (UI && UI.pill) UI.pill.classList.remove('tvxa-hot');
+    }, 3200);
   }
 
   // ---------------------------------------------------------------- 页内横幅
@@ -372,6 +479,61 @@
     }, 8000);
   }
 
+  // ---------------------------------------------------------------- 入口按钮
+
+  var BELL_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path>' +
+    '<path d="M13.7 21a2 2 0 0 1-3.4 0"></path></svg>';
+
+  /** 在右侧绘图工具栏里挂一个仿原生的闹钟按钮（最像「原来」的位置） */
+  function ensureToolbarButton() {
+    if (!UI) return;
+    try {
+      var bar = document.querySelector('[data-name="right-toolbar"]');
+      if (!bar) return;
+      var existing = document.getElementById('tvxa-toolbar-btn');
+      if (existing) {
+        if (existing.parentNode !== bar) bar.insertBefore(existing, bar.firstChild);
+        return;
+      }
+      var b = document.createElement('button');
+      b.id = 'tvxa-toolbar-btn';
+      b.type = 'button';
+      b.title = '本地指标报警（Alt+A）';
+      b.setAttribute('aria-label', '本地指标报警');
+      b.style.cssText = 'all:unset;box-sizing:border-box;display:flex;align-items:center;justify-content:center;' +
+        'width:36px;height:36px;min-height:36px;flex:0 0 36px;margin:2px auto;border-radius:8px;cursor:pointer;' +
+        'position:relative;color:#2962ff;background:rgba(41,98,255,.10)';
+      b.innerHTML = BELL_SVG.replace('<svg ', '<svg style="flex:none;display:block" ') +
+        '<span id="tvxa-toolbar-badge" style="position:absolute;top:1px;right:1px;min-width:14px;height:14px;' +
+        'padding:0 3px;border-radius:7px;background:#f23645;color:#fff;font:700 9px/14px -apple-system,' +
+        '"Segoe UI",sans-serif;text-align:center;display:none"></span>';
+      b.addEventListener('mouseenter', function () { b.style.background = 'rgba(41,98,255,.22)'; });
+      b.addEventListener('mouseleave', function () { b.style.background = 'rgba(41,98,255,.10)'; });
+      b.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggle(true);
+      });
+      // 工具栏按钮在文档里、不在 shadow root 内，闪烁动画需要一条文档级样式
+      if (!document.getElementById('tvxa-toolbar-style')) {
+        var st = document.createElement('style');
+        st.id = 'tvxa-toolbar-style';
+        st.textContent = '#tvxa-toolbar-btn.tvxa-hot{animation:tvxaToolPulse .9s ease-in-out 3}' +
+          '@keyframes tvxaToolPulse{0%,100%{background:rgba(41,98,255,.10);color:#2962ff}' +
+          '50%{background:#f23645;color:#fff}}';
+        (document.head || document.documentElement).appendChild(st);
+      }
+      var native = bar.querySelector('[data-name="alerts"]');
+      if (native && native.parentNode) bar.insertBefore(b, native.nextSibling);
+      else bar.insertBefore(b, bar.firstChild);
+      UI.toolBtn = b;
+      UI.toolBadge = b.querySelector('#tvxa-toolbar-badge');
+      pulse();
+    } catch (e) {}
+  }
+
   // ---------------------------------------------------------------- 设置页 UI
 
   var FORM = {
@@ -380,11 +542,15 @@
     condition: 'cross_up',
     value: 70,
     value2: 30,
-    cooldownMin: 0,
-    once: false,
+    msgTitle: DEFAULT_TITLE,
+    msgBody: DEFAULT_BODY,
     notifySystem: true,
-    notifyEmail: false
+    notifyEmail: false,
+    emailFrom: '',
+    emailTo: ''
   };
+
+  var LAST_FIELD = null;
 
   function el(tag, cls, text) {
     var n = document.createElement(tag);
@@ -434,6 +600,14 @@
     return i;
   }
 
+  function section(title, nodes, hint) {
+    var s = el('div', 'tvxa-section');
+    s.appendChild(el('div', 'tvxa-sec-title', title));
+    for (var i = 0; i < nodes.length; i++) s.appendChild(nodes[i]);
+    if (hint) s.appendChild(el('div', 'tvxa-hint', hint));
+    return s;
+  }
+
   function buildUI() {
     var host = document.createElement('div');
     host.id = 'tvx-alerts-host';
@@ -443,13 +617,21 @@
     var style = document.createElement('style');
     style.textContent = [
       ':host{all:initial}',
-      '.tvxa-pill{pointer-events:auto;position:fixed;right:14px;bottom:64px;padding:6px 12px;border-radius:14px;',
-      'border:1px solid rgba(120,130,150,.5);background:rgba(30,34,45,.92);color:#d1d4dc;font:12px/1.2 -apple-system,',
-      '"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.35)}',
-      '.tvxa-pill:hover{background:rgba(42,46,57,.95)}',
+      // 悬浮入口：品牌色实心胶囊，带铃铛和计数，比原来的灰字显眼得多
+      '.tvxa-pill{pointer-events:auto;position:fixed;right:64px;bottom:28px;display:flex;align-items:center;gap:7px;',
+      'padding:8px 13px 8px 11px;border-radius:20px;border:1px solid rgba(41,98,255,.75);background:#2962ff;',
+      'color:#fff;font:600 12px/1 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;cursor:pointer;',
+      'box-shadow:0 6px 18px rgba(41,98,255,.42);transition:transform .15s,box-shadow .15s,background .15s;z-index:2}',
+      '.tvxa-pill:hover{background:#1e53e5;transform:translateY(-1px);box-shadow:0 8px 22px rgba(41,98,255,.55)}',
+      '.tvxa-pill .tvxa-ico{display:flex;align-items:center}',
+      '.tvxa-pill-count{background:rgba(255,255,255,.24);border-radius:9px;padding:1px 5px;font-size:10px}',
+      '.tvxa-pill.toolbar-hidden{display:none}',
+      '.tvxa-hot{animation:tvxaPulse 1s ease-in-out 3}',
+      '@keyframes tvxaPulse{0%,100%{box-shadow:0 6px 18px rgba(41,98,255,.42)}',
+      '50%{box-shadow:0 0 0 6px rgba(242,54,69,.55)}}',
       '.tvxa-mask{pointer-events:auto;position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;',
       'align-items:center;justify-content:center}',
-      '.tvxa-card{width:660px;max-width:calc(100vw - 40px);max-height:78vh;display:flex;flex-direction:column;',
+      '.tvxa-card{width:680px;max-width:calc(100vw - 40px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;',
       'background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:10px;overflow:hidden;',
       'box-shadow:0 12px 48px rgba(0,0,0,.5);font:13px/1.45 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}',
       '.tvxa-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #2a2e39}',
@@ -460,10 +642,12 @@
       'color:#a3a6af;cursor:pointer;font:inherit}',
       '.tvxa-tab.on{background:#2a2e39;border-color:#363a45;border-bottom-color:#2a2e39;color:#e6e8ec}',
       '.tvxa-body{padding:12px 14px 16px;overflow:auto;flex:1}',
+      '.tvxa-section{border:1px solid #2a2e39;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#1b1f29}',
+      '.tvxa-sec-title{font-size:12px;font-weight:600;color:#e6e8ec;margin-bottom:6px;letter-spacing:.3px}',
       '.tvxa-row{border:1px solid #2a2e39;border-radius:8px;padding:10px;margin-bottom:8px;background:#22262f}',
       '.tvxa-row-head{display:flex;align-items:center;gap:8px}',
       '.tvxa-row-title{flex:1;font-weight:600;color:#e6e8ec;font-size:13px}',
-      '.tvxa-row-sub{color:#9aa0aa;font-size:12px;margin-top:4px}',
+      '.tvxa-row-sub{color:#9aa0aa;font-size:12px;margin-top:4px;white-space:pre-wrap}',
       '.tvxa-chip{font-size:11px;padding:2px 7px;border-radius:10px;border:1px solid #3d4250;color:#a3a6af}',
       '.tvxa-chip.ok{color:#4caf50;border-color:#2e5c33}',
       '.tvxa-chip.warn{color:#e0a03a;border-color:#5c4a2a}',
@@ -475,16 +659,20 @@
       '.tvxa-btn:hover{background:#333846}',
       '.tvxa-btn.primary{background:#2962ff;border-color:#2962ff;color:#fff}',
       '.tvxa-btn.danger{color:#ff7b72;border-color:#5a3230}',
-      '.tvxa-field{margin-bottom:10px}',
+      '.tvxa-btn.ph{padding:2px 7px;font-size:11px;color:#8ab0ff;border-color:#2f3f63;background:#1a2130}',
+      '.tvxa-field{margin-bottom:8px}',
       '.tvxa-label{font-size:12px;color:#9aa0aa;margin-bottom:4px}',
-      '.tvxa-hint{font-size:11px;color:#787b86;margin-top:3px}',
+      '.tvxa-hint{font-size:11px;color:#787b86;margin-top:3px;line-height:1.5}',
       '.tvxa-input{width:100%;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid #3d4250;',
       'background:#131722;color:#d1d4dc;font:12px/1.4 inherit;outline:none}',
       '.tvxa-input:focus{border-color:#2962ff}',
+      'textarea.tvxa-input{resize:vertical;min-height:52px;font-family:inherit}',
       '.tvxa-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
       '.tvxa-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}',
       '.tvxa-check{display:flex;align-items:center;gap:6px;margin:6px 0;font-size:12px;color:#c9ccd3}',
       '.tvxa-check input{accent-color:#2962ff}',
+      '.tvxa-info{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#a3a6af}',
+      '.tvxa-info b{color:#d1d4dc;font-weight:600}',
       '.tvxa-empty{color:#787b86;font-size:12px;padding:18px 4px;text-align:center}',
       '.tvxa-banner{pointer-events:none;position:fixed;left:50%;top:16px;transform:translate(-50%,-8px);',
       'max-width:600px;padding:10px 14px;border-radius:8px;color:#f0f3fa;white-space:pre-wrap;',
@@ -492,9 +680,16 @@
       'transition:opacity .2s,transform .2s;box-shadow:0 6px 24px rgba(0,0,0,.4)}'
     ].join('');
 
-    var pill = el('button', 'tvxa-pill', '报警');
+    var pill = el('button', 'tvxa-pill', '');
     pill.type = 'button';
-    pill.title = 'TVHelper 指标报警（Alt+A）';
+    pill.title = '本地指标报警（Alt+A）';
+    var pillIco = el('span', 'tvxa-ico');
+    pillIco.innerHTML = BELL_SVG;
+    var pillLabel = el('span', 'tvxa-pill-label', '报警');
+    var pillCount = el('span', 'tvxa-pill-count', '');
+    pill.appendChild(pillIco);
+    pill.appendChild(pillLabel);
+    pill.appendChild(pillCount);
 
     var banner = el('div', 'tvxa-banner');
 
@@ -530,11 +725,12 @@
     document.documentElement.appendChild(host);
 
     UI = {
-      host: host, root: root, pill: pill, banner: banner, mask: mask, body: body,
+      host: host, root: root, pill: pill, pillLabel: pillLabel, pillCount: pillCount,
+      banner: banner, mask: mask, body: body, toolBtn: null, toolBadge: null,
       chartInfo: chartInfo, tab: 'list', open: false, tabEls: { list: tabList, new: tabNew, notify: tabNotify }
     };
 
-    function switchTab(name) {
+    switchTab = function (name) {
       UI.tab = name;
       Object.keys(UI.tabEls).forEach(function (k) {
         UI.tabEls[k].className = 'tvxa-tab' + (k === name ? ' on' : '');
@@ -542,7 +738,7 @@
       if (name === 'list') renderList();
       else if (name === 'new') renderForm();
       else renderNotify();
-    }
+    };
 
     pill.addEventListener('click', function () { toggle(!UI.open); });
     tabList.addEventListener('click', function () { switchTab('list'); });
@@ -559,6 +755,8 @@
       }
     }, true);
   }
+
+  var switchTab = function () {};
 
   function toggle(open) {
     if (!UI) return;
@@ -608,12 +806,13 @@
       row.appendChild(el('div', 'tvxa-row-sub',
         al.symbol + ' · ' + al.resolution + ' · ' + describe(al) +
         (al.studyInputs && al.studyInputs.length ? ' · ' + inputsText(al.studyInputs) : '')));
+      if (al.msgTitle) {
+        row.appendChild(el('div', 'tvxa-row-sub', '消息标题：' + al.msgTitle));
+      }
       var rt = state(al.id);
       var extra = [];
       if (rt.value != null) extra.push('当前值 ' + fmtNum(rt.value));
       if (al.lastFiredAt) extra.push('上次触发 ' + new Date(al.lastFiredAt).toLocaleString());
-      if (al.cooldownMin > 0) extra.push('冷却 ' + al.cooldownMin + ' 分钟');
-      if (al.once) extra.push('只触发一次');
       extra.push('通知：' + ((al.notify || []).indexOf('email') >= 0 ? '系统+邮件' : '系统'));
       var line = el('div', 'tvxa-row-sub', extra.join(' · '));
       row.appendChild(line);
@@ -641,6 +840,13 @@
         saveConfig();
         renderList();
       }));
+      acts.appendChild(btn('预览消息', '', function () {
+        var c = chartCtx();
+        var vars = msgVars(c, al, al.plotTitle, rt.value);
+        var t = renderTemplate(al.msgTitle || DEFAULT_TITLE, vars);
+        var b = renderTemplate(al.msgBody || DEFAULT_BODY, vars);
+        showBanner(t + '\n' + b);
+      }));
       acts.appendChild(btn('删除', 'danger', function () {
         CFG.alerts = CFG.alerts.filter(function (x) { return x.id !== al.id; });
         saveConfig();
@@ -653,6 +859,14 @@
 
   function newAlertId() {
     return 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
+  function gotoList() {
+    UI.tab = 'list';
+    Object.keys(UI.tabEls).forEach(function (k) {
+      UI.tabEls[k].className = 'tvxa-tab' + (k === 'list' ? ' on' : '');
+    });
+    renderList();
   }
 
   function renderForm() {
@@ -674,7 +888,9 @@
       FORM.plotIndex = 0;
     }
     var current = meta.filter(function (s) { return s.id === FORM.studyId; })[0] || meta[0];
+    if (FORM.plotIndex >= current.plots.length) FORM.plotIndex = 0;
 
+    // ---- 条件：指标 → 该指标定义的条件（曲线）→ 比较方式
     var studySel = selectEl(meta.map(function (s) {
       return { value: s.id, label: s.name + (s.inputs.length ? '（' + inputsText(s.inputs) + '）' : '') };
     }), FORM.studyId);
@@ -687,15 +903,83 @@
     var plotSel = selectEl(current.plots.map(function (p) {
       return { value: p.index, label: p.title + '（当前 ' + fmtNum(p.value) + '）' };
     }), FORM.plotIndex);
-    plotSel.addEventListener('change', function () { FORM.plotIndex = Number(plotSel.value); });
+    plotSel.addEventListener('change', function () {
+      FORM.plotIndex = Number(plotSel.value);
+    });
 
     var condSel = selectEl(CONDS.map(function (c) { return { value: c.id, label: c.label }; }), FORM.condition);
     var valueInput = inputEl(FORM.value, 'number', 'any');
     var value2Input = inputEl(FORM.value2, 'number', 'any');
-    var cooldownInput = inputEl(FORM.cooldownMin, 'number', '1');
-    var onceChk = document.createElement('input');
-    onceChk.type = 'checkbox';
-    onceChk.checked = !!FORM.once;
+
+    var condGrid = el('div', 'tvxa-two');
+    condGrid.appendChild(field('指标', studySel));
+    condGrid.appendChild(field('条件（该指标定义的输出）', plotSel));
+
+    var opGrid = el('div', 'tvxa-three');
+    opGrid.appendChild(field('比较方式', condSel));
+    var vWrap = field('阈值', valueInput);
+    var v2Wrap = field('上限（区间条件用）', value2Input);
+    opGrid.appendChild(vWrap);
+    opGrid.appendChild(v2Wrap);
+    var isRange = FORM.condition === 'in_range' || FORM.condition === 'out_range';
+    v2Wrap.style.display = isRange ? '' : 'none';
+    condSel.addEventListener('change', function () {
+      FORM.condition = condSel.value;
+      isRange = FORM.condition === 'in_range' || FORM.condition === 'out_range';
+      v2Wrap.style.display = isRange ? '' : 'none';
+    });
+
+    var condSection = section('条件', [condGrid, opGrid],
+      '先选指标，再选它自己的输出（如 RSI 的 RSI、布林带的上/下轨）。');
+
+    // ---- 周期和触发：不做输入，只标注与图表一致
+    var info = el('div', 'tvxa-info');
+    var infoPeriod = el('div');
+    infoPeriod.innerHTML = '周期：<b>' + (ctx.resolution || '-') + '</b>（与图表一致）';
+    var infoTrigger = el('div');
+    infoTrigger.innerHTML = '触发：<b>每根 K 线最多一次</b>';
+    info.appendChild(infoPeriod);
+    info.appendChild(infoTrigger);
+    var periodSection = section('周期和触发', [info],
+      '不单独设置，始终跟随当前图表的品种与周期。');
+
+    // ---- 消息：标题 + 内容 + 占位符
+    var titleInput = inputEl(FORM.msgTitle || '', 'text');
+    var bodyInput = document.createElement('textarea');
+    bodyInput.className = 'tvxa-input';
+    bodyInput.value = FORM.msgBody || '';
+    bodyInput.spellcheck = false;
+    LAST_FIELD = bodyInput;
+    [titleInput, bodyInput].forEach(function (n) {
+      n.addEventListener('focus', function () { LAST_FIELD = n; });
+    });
+
+    var chips = el('div', 'tvxa-actions');
+    PLACEHOLDERS.forEach(function (name) {
+      chips.appendChild(btn('{{' + name + '}}', 'ph', function () {
+        var target = LAST_FIELD || bodyInput;
+        var token = '{{' + name + '}}';
+        try {
+          var s = target.selectionStart == null ? target.value.length : target.selectionStart;
+          var e = target.selectionEnd == null ? s : target.selectionEnd;
+          target.value = target.value.slice(0, s) + token + target.value.slice(e);
+          target.selectionStart = target.selectionEnd = s + token.length;
+          target.focus();
+        } catch (err) {
+          target.value += token;
+        }
+        if (target === titleInput) FORM.msgTitle = target.value;
+        else FORM.msgBody = target.value;
+      }));
+    });
+
+    var msgSection = section('消息', [
+      field('标题', titleInput),
+      field('内容', bodyInput, '点击标签插入占位符：'),
+      chips
+    ], '触发时替换占位符后，作为通知标题/正文与邮件主题/正文发送。');
+
+    // ---- 通知：系统 / 邮件（可覆盖发件人与收件人）
     var sysChk = document.createElement('input');
     sysChk.type = 'checkbox';
     sysChk.checked = FORM.notifySystem !== false;
@@ -703,42 +987,38 @@
     mailChk.type = 'checkbox';
     mailChk.checked = !!FORM.notifyEmail;
 
-    var rangeRow = el('div', 'tvxa-two');
-    rangeRow.appendChild(field('下限/阈值', valueInput));
-    rangeRow.appendChild(field('上限（区间条件用）', value2Input));
-    rangeRow.style.display = (FORM.condition === 'in_range' || FORM.condition === 'out_range') ? 'grid' : 'none';
-    condSel.addEventListener('change', function () {
-      FORM.condition = condSel.value;
-      rangeRow.style.display = (FORM.condition === 'in_range' || FORM.condition === 'out_range') ? 'grid' : 'none';
-    });
-
-    var grid = el('div', 'tvxa-two');
-    grid.appendChild(field('指标（当前图表）', studySel));
-    grid.appendChild(field('曲线', plotSel));
-
-    var grid2 = el('div', 'tvxa-three');
-    grid2.appendChild(field('条件', condSel));
-    grid2.appendChild(field('冷却（分钟，0=不限）', cooldownInput));
-    grid2.appendChild(field('触发一次后停用', onceChk));
-
-    var note = el('div', 'tvxa-hint',
-      '报警只在当前图表标签上报这个品种、这个周期、这个指标（含参数）时生效。图表关了或指标被删，会显示「未就绪」而不会触发。');
-
     var chkSys = el('label', 'tvxa-check');
     chkSys.appendChild(sysChk);
-    chkSys.appendChild(el('span', null, '系统通知（弹窗）'));
+    chkSys.appendChild(el('span', null, '系统通知（桌面弹窗）'));
     var chkMail = el('label', 'tvxa-check');
     chkMail.appendChild(mailChk);
-    chkMail.appendChild(el('span', null, '邮件通知（需先在「通知设置」里配置 SMTP）'));
+    chkMail.appendChild(el('span', null, '邮件通知'));
+
+    var fromInput = inputEl(FORM.emailFrom || '', 'text');
+    fromInput.placeholder = '留空用通知设置里的发件人';
+    var toInput = inputEl(FORM.emailTo || '', 'text');
+    toInput.placeholder = '留空用通知设置里的收件人；多个用逗号分隔';
+    var mailGrid = el('div', 'tvxa-two');
+    mailGrid.appendChild(field('发件人', fromInput));
+    mailGrid.appendChild(field('收件人', toInput));
+    mailGrid.style.display = mailChk.checked ? '' : 'none';
+    mailChk.addEventListener('change', function () {
+      mailGrid.style.display = mailChk.checked ? '' : 'none';
+    });
+
+    var notifySection = section('通知', [chkSys, chkMail, mailGrid],
+      'SMTP 在「通知设置」里配一次；这里的收发件人只对这一条生效。');
 
     var actions = el('div', 'tvxa-actions');
     actions.appendChild(btn('创建报警', 'primary', function () {
       FORM.value = Number(valueInput.value);
       FORM.value2 = Number(value2Input.value);
-      FORM.cooldownMin = Number(cooldownInput.value) || 0;
-      FORM.once = !!onceChk.checked;
+      FORM.msgTitle = titleInput.value;
+      FORM.msgBody = bodyInput.value;
       FORM.notifySystem = !!sysChk.checked;
       FORM.notifyEmail = !!mailChk.checked;
+      FORM.emailFrom = fromInput.value.trim();
+      FORM.emailTo = toInput.value.trim();
       if (FORM.condition === 'in_range' || FORM.condition === 'out_range') {
         if (!isFinite(FORM.value) || !isFinite(FORM.value2)) {
           showBanner('区间条件需要填写两个数值', true);
@@ -764,9 +1044,13 @@
         condition: FORM.condition,
         value: FORM.value,
         value2: FORM.value2,
-        cooldownMin: FORM.cooldownMin,
-        once: FORM.once,
+        cooldownMin: 0,
+        once: false,
+        msgTitle: FORM.msgTitle,
+        msgBody: FORM.msgBody,
         notify: notify,
+        emailFrom: FORM.notifyEmail ? FORM.emailFrom : '',
+        emailTo: FORM.notifyEmail ? FORM.emailTo : '',
         enabled: true,
         createdAt: Date.now(),
         lastFiredAt: 0,
@@ -775,31 +1059,15 @@
       CFG.alerts.push(al);
       saveConfig().then(function (ok) {
         showBanner(ok ? '已创建：' + describe(al) : '保存失败，检查是否允许写入配置', !ok);
-        UI.tab = 'list';
-        Object.keys(UI.tabEls).forEach(function (k) {
-          UI.tabEls[k].className = 'tvxa-tab' + (k === 'list' ? ' on' : '');
-        });
-        renderList();
+        gotoList();
       });
     }));
-    actions.appendChild(btn('取消', '', function () {
-      UI.tab = 'list';
-      Object.keys(UI.tabEls).forEach(function (k) {
-        UI.tabEls[k].className = 'tvxa-tab' + (k === 'list' ? ' on' : '');
-      });
-      renderList();
-    }));
+    actions.appendChild(btn('取消', '', function () { gotoList(); }));
 
-    body.appendChild(grid);
-    body.appendChild(grid2);
-    body.appendChild(rangeRow);
-    body.appendChild(field('通知方式', (function () {
-      var w = el('div');
-      w.appendChild(chkSys);
-      w.appendChild(chkMail);
-      return w;
-    })()));
-    body.appendChild(note);
+    body.appendChild(condSection);
+    body.appendChild(periodSection);
+    body.appendChild(msgSection);
+    body.appendChild(notifySection);
     body.appendChild(actions);
   }
 
@@ -829,8 +1097,10 @@
     grid2.appendChild(field('账号', userI));
     grid2.appendChild(field('授权码/密码', passI, '保存在本机 profile 目录，明文，注意安全'));
     var grid3 = el('div', 'tvxa-two');
-    grid3.appendChild(field('发件人（留空用账号）', fromI));
-    grid3.appendChild(field('收件人（逗号分隔）', toI));
+    grid3.appendChild(field('发件人', fromI, '默认发件地址'));
+    grid3.appendChild(field('收件人', toI, '多个用逗号分隔'));
+
+    var mailSection = section('邮件（SMTP）', [grid, grid2, grid3], '这里是全局默认值；单条报警可以在「新建报警 → 通知」里覆盖发件人/收件人。');
 
     var secureWrap = el('label', 'tvxa-check');
     secureWrap.appendChild(secureChk);
@@ -838,10 +1108,10 @@
     var sysWrap = el('label', 'tvxa-check');
     sysWrap.appendChild(sysChk);
     sysWrap.appendChild(el('span', null, '允许系统通知（弹窗）'));
+    var sysSection = section('系统通知', [sysWrap, secureWrap], '');
 
-    var actions = el('div', 'tvxa-actions');
-    actions.appendChild(btn('保存通知设置', 'primary', function () {
-      CFG.email = {
+    function readMail() {
+      return {
         host: hostI.value.trim(),
         port: Number(portI.value) || 465,
         secure: !!secureChk.checked,
@@ -850,6 +1120,11 @@
         from: fromI.value.trim(),
         to: toI.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean)
       };
+    }
+
+    var actions = el('div', 'tvxa-actions');
+    actions.appendChild(btn('保存通知设置', 'primary', function () {
+      CFG.email = readMail();
       CFG.system = !!sysChk.checked;
       saveConfig().then(function (ok) {
         showBanner(ok ? '通知设置已保存' : '保存失败', !ok);
@@ -861,15 +1136,7 @@
       });
     }));
     actions.appendChild(btn('测试邮件', '', function () {
-      CFG.email = {
-        host: hostI.value.trim(),
-        port: Number(portI.value) || 465,
-        secure: !!secureChk.checked,
-        user: userI.value.trim(),
-        pass: passI.value,
-        from: fromI.value.trim(),
-        to: toI.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean)
-      };
+      CFG.email = readMail();
       saveConfig().then(function () {
         showBanner('正在发送测试邮件…');
         BR.test('email').then(function (r) {
@@ -878,11 +1145,8 @@
       });
     }));
 
-    body.appendChild(grid);
-    body.appendChild(grid2);
-    body.appendChild(grid3);
-    body.appendChild(secureWrap);
-    body.appendChild(sysWrap);
+    body.appendChild(mailSection);
+    body.appendChild(sysSection);
     body.appendChild(el('div', 'tvxa-hint',
       '系统通知走操作系统通知中心（Windows 右下角 / macOS 通知中心 / Linux libnotify）。邮件只在勾了「邮件通知」的报警触发时发送。'));
     body.appendChild(actions);
@@ -902,7 +1166,9 @@
         });
       }
       pulse();
+      ensureToolbarButton();
       setInterval(tick, TICK_MS);
+      setInterval(ensureToolbarButton, 2000);
       setTimeout(tick, 800);
       window.addEventListener('focus', function () { loadConfig(false).then(pulse); });
     });
@@ -910,8 +1176,18 @@
     window.__tvxAlertsDebug = {
       tick: tick,
       ctx: chartCtx,
+      bar: function () { return mainBar(chartCtx()); },
       studies: function () { var c = chartCtx(); return c ? studyMeta(c.a) : []; },
       config: function () { return CFG; },
+      render: function (tpl, al) {
+        var c = chartCtx();
+        return renderTemplate(tpl, msgVars(c, al || { condition: 'cross_up', value: 0 }, '', null));
+      },
+      vars: function () {
+        var c = chartCtx();
+        return msgVars(c, { condition: 'cross_up', value: 0, studyName: 'RSI', plotTitle: 'RSI' }, '', null);
+      },
+      open: function (tab) { toggle(true); if (tab) switchTab(tab); },
       fire: fire
     };
   }

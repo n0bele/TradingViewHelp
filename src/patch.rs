@@ -1042,5 +1042,25 @@ mod tests {
         assert!(ALERTS_MAIN_JS.contains("tvx-alerts:fire"), "触发通道名要固定");
         assert!(ALERTS_MAIN_JS.contains("executeJavaScript"), "主进程负责注入引擎");
         assert!(!ALERTS_MAIN_JS.contains("process.exit"), "主进程模块不得退出进程");
+
+        // 报警设置的四段结构要与需求对齐（条件 / 周期和触发 / 消息 / 通知）
+        for s in ["条件", "周期和触发", "消息", "通知"] {
+            assert!(ALERTS_ENGINE_JS.contains(s), "设置页缺少分组：{s}");
+        }
+        // 条件必须能级联到「指标自己定义的输出」
+        assert!(ALERTS_ENGINE_JS.contains("条件（该指标定义的输出）"));
+        // 周期/触发不单独设置，只标注与图表一致
+        assert!(ALERTS_ENGINE_JS.contains("与图表一致"));
+        assert!(!ALERTS_ENGINE_JS.contains("冷却（分钟"), "触发频次不再暴露给用户");
+        // 占位符渲染与 OHLC 数据源
+        assert!(ALERTS_ENGINE_JS.contains("renderTemplate"));
+        assert!(ALERTS_ENGINE_JS.contains("mainSeries"));
+        assert!(ALERTS_ENGINE_JS.contains("\\{\\{\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\}\\}"));
+        // 入口：右侧工具栏 + 品牌色悬浮胶囊
+        assert!(ALERTS_ENGINE_JS.contains("right-toolbar"));
+        assert!(ALERTS_ENGINE_JS.contains("tvxa-toolbar-btn"));
+        // 邮件可按报警覆盖收发件人
+        assert!(ALERTS_MAIN_JS.contains("emailFrom") && ALERTS_MAIN_JS.contains("emailTo"));
+        assert!(ALERTS_MAIN_JS.contains("if (p.body) return p.body"), "邮件正文优先用模板渲染结果");
     }
 }
