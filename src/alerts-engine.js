@@ -33,14 +33,29 @@
   var BANNER_TIMER = 0;
   var HOT_TIMER = 0;
 
+  // 数值型输出（line / histogram / area / columns）才需要比较方式与阈值。
+  // 离散型输出（colorer，如 SuperTrend 的涨跌着色）只有「变成哪个值」，
+  // 没有阈值可言——那是指标自己算好的状态，不是连续数值。
   var CONDS = [
     { id: 'cross_up', label: '上穿' },
     { id: 'cross_down', label: '下穿' },
     { id: 'gt', label: '大于' },
     { id: 'lt', label: '小于' },
     { id: 'in_range', label: '进入区间' },
-    { id: 'out_range', label: '离开区间' }
+    { id: 'out_range', label: '离开区间' },
+    { id: 'appear', label: '出现（从无到有）', noValue: true },
+    { id: 'disappear', label: '消失（从有到无）', noValue: true }
   ];
+  var COND_CHANGED = 'changed_to';
+
+  function isNum(v) {
+    return typeof v === 'number' && isFinite(v);
+  }
+
+  function condNeedsValue(id) {
+    for (var i = 0; i < CONDS.length; i++) if (CONDS[i].id === id) return !CONDS[i].noValue;
+    return id !== COND_CHANGED;
+  }
 
   // 占位符清单（顺序即设置页里按钮的排列顺序）
   var PLACEHOLDERS = [
@@ -52,6 +67,7 @@
   var DEFAULT_BODY = '{{ticker}} {{interval}} {{study}} · {{plot}} {{condition}} {{threshold}}\n当前 {{close}}（开 {{open}} 高 {{high}} 低 {{low}}）';
 
   function condLabel(id) {
+    if (id === COND_CHANGED) return '变为';
     for (var i = 0; i < CONDS.length; i++) if (CONDS[i].id === id) return CONDS[i].label;
     return id;
   }
@@ -111,6 +127,79 @@
     }
   }
 
+  /** study 的 metainfo（WatchedValue 拆包）：plots / styles / palettes / inputs 都在这里 */
+  function metaValue(st) {
+    try {
+      var w = st && st._metaInfo;
+      if (!w) return null;
+      if (typeof w.value === 'function') return w.value();
+      return w._value || w;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** plot 类型 → 条件类别：离散（colorer）、图形（plotshape，不占数据列）、数值 */
+  function kindOf(type) {
+    if (type === 'colorer') return 'discrete';
+    if (type === 'plotshape' || type === 'plotchar' || type === 'shape' || type === 'chars') return 'shape';
+    return 'numeric';
+  }
+
+  function plotTitleOf(def, idx, titles, styles) {
+    if (titles[idx]) return titles[idx];
+    var s = styles && styles[def && def.id];
+    if (s && s.title) return s.title;
+    return (def && def.id) || ('输出 ' + (idx + 1));
+  }
+
+  /** colorer 的调色板：值 → 颜色，用来把 0/1/2 显示成可辨认的色块 */
+  function paletteOf(mi, def) {
+    try {
+      var name = def && def.palette;
+      var pal = name ? (mi.palettes || {})[name] : null;
+      var colors = pal && pal.colors;
+      if (!colors) return null;
+      return function (v) {
+        var c = colors[String(v)];
+        if (!c) return null;
+        return c.color || (typeof c === 'string' ? c : null);
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 某列最近 n 根的取值（用于枚举离散输出的历史取值；空值与 NaN 要剔除） */
+  function columnHistory(d, col, n) {
+    var arr = [];
+    try {
+      var li = d.lastIndex();
+      var from = Math.max(0, li - n + 1);
+      for (var i = from; i <= li; i++) {
+        var v = d.valueAt(i);
+        var cv = v ? v[col] : undefined;
+        if (cv === undefined || cv === null || cv === '') continue;
+        if (typeof cv === 'number' && !isFinite(cv)) continue;
+        arr.push(cv);
+      }
+    } catch (e) {}
+    return arr;
+  }
+
+  /**
+   * 指标的真实输出项。
+   *
+   * 关键事实（实测 3.5.0.8375）：`study._metaInfo` 里只有 plots / inputs / styles /
+   * palettes，**没有 alertcondition**。Pine 的 alertcondition 由服务端编译保存、服务端评估，
+   * 客户端既拿不到名字也拿不到布尔序列（搜索结果里只有数量，如
+   * `stats:{alertcondition:6}`）。所以「条件」只能是这里能读到的真实输出列。
+   *
+   * plots 的顺序 == PlotList 的列顺序（time 之后依次对应），实测 Volume：
+   * plots=[vol:line, vol_color:colorer, vol_ma:line]，最后一根
+   * `[time, 50288918, 1, 47993111.2]` ← 三列一一对应，colorer 的值可读但不在
+   * valuesProvider 里（所以只看 valuesProvider 会漏掉颜色列，这正是旧版取错条件的原因）。
+   */
   function studyMeta(a) {
     var out = [];
     var list = [];
@@ -119,7 +208,7 @@
       var id = list[i] && list[i].id;
       var name = String((list[i] && list[i].name) || '');
       if (!id || !name) continue;
-      var row = { id: String(id), name: name, inputs: [], plots: [], ok: false };
+      var row = { id: String(id), name: name, inputs: [], plots: [], ok: false, note: '', serverConds: 0 };
       try {
         var api = a.getStudyById(id);
         if (api && typeof api.getInputValues === 'function') {
@@ -128,6 +217,9 @@
         }
         var st = api && api._study;
         var d = plotList(st);
+        var mi = metaValue(st) || {};
+        var defs = mi.plots || [];
+        var styles = mi.styles || {};
         if (d) {
           var li = d.lastIndex();
           var v = li >= 0 ? d.valueAt(li) : null;
@@ -145,8 +237,57 @@
                 }
               }
             } catch (e) {}
-            for (var k = 0; k < v.length - 1; k++) {
-              row.plots.push({ index: k, title: titles[k] || ('曲线 ' + (k + 1)), value: v[k + 1] });
+            var cols = v.length - 1;
+            // 只有会产出数值/状态列的 plot 类型才对得上数据列。
+            // alertcondition / plotshape / plotchar 这类只在图上画东西或在服务端评估，
+            // 不占数据列——必须先把它们挑出去，否则列会整体错位。
+            var COL_TYPES = {
+              line: 1, histogram: 1, area: 1, columns: 1, stepline: 1,
+              colorer: 1, text_colorer: 1, data: 1, linebr: 1
+            };
+            var colDefs = [];
+            var otherDefs = [];
+            for (var di = 0; di < defs.length; di++) {
+              var dt = String((defs[di] && defs[di].type) || 'line');
+              if (COL_TYPES[dt]) colDefs.push(defs[di]);
+              else otherDefs.push(defs[di]);
+            }
+            var serverConds = 0;
+            for (var oi = 0; oi < otherDefs.length; oi++) {
+              if (String((otherDefs[oi] || {}).type) === 'alertcondition') serverConds++;
+            }
+            row.serverConds = serverConds;
+            var defByCol = colDefs.length === cols ? colDefs : null;
+            if (!defByCol) {
+              defByCol = [];
+              for (var q = 0; q < cols; q++) defByCol.push({ id: '', type: 'line' });
+              row.note = '输出定义 ' + defs.length + ' 条 / 数据列 ' + cols + ' 列，按列名兜底';
+            }
+            for (var k = 0; k < cols; k++) {
+              var def = defByCol[k] || { id: '', type: 'line' };
+              var kind = kindOf(def.type);
+              var item = {
+                index: k,
+                id: String(def.id || ('col' + k)),
+                title: plotTitleOf(def, k, titles, styles),
+                type: String(def.type || 'line'),
+                kind: kind,
+                value: v[k + 1]
+              };
+              if (kind === 'discrete') {
+                var hist = columnHistory(d, k + 1, 400);
+                var seen = Object.create(null);
+                var choices = [];
+                for (var h = 0; h < hist.length; h++) {
+                  var key = String(hist[h]);
+                  if (!seen[key]) { seen[key] = 0; choices.push(hist[h]); }
+                  seen[key]++;
+                }
+                item.choices = choices.slice(0, 12);
+                item.counts = seen;
+                item.color = paletteOf(mi, def);
+              }
+              row.plots.push(item);
             }
           }
         }
@@ -211,7 +352,12 @@
   // ---------------------------------------------------------------- 条件求值
 
   function evalCond(cond, prev, cur, v, v2) {
-    if (typeof cur !== 'number' || !isFinite(cur)) return false;
+    var cn = isNum(cur);
+    var pn = isNum(prev);
+    // na 交替的列（SuperTrend 的上/下轨就是这样）用「出现 / 消失」表达趋势切换
+    if (cond === 'appear') return cn && !pn;
+    if (cond === 'disappear') return !cn && pn;
+    if (!cn) return false;
     var lo = Math.min(v, v2);
     var hi = Math.max(v, v2);
     switch (cond) {
@@ -230,6 +376,17 @@
       default:
         return false;
     }
+  }
+
+  /**
+   * 离散输出（colorer）的求值：本根与上一根不同、且本根等于目标值。
+   * 这类输出是「指标算好的状态」（涨/跌/中性），没有阈值，只有切换。
+   */
+  function evalChangedTo(prev, cur, target) {
+    if (cur === null || cur === undefined) return false;
+    if (String(cur) !== String(target)) return false;
+    if (prev === null || prev === undefined || prev === '') return false;
+    return String(prev) !== String(cur);
   }
 
   // ---------------------------------------------------------------- 配置读写
@@ -281,13 +438,17 @@
   }
 
   function rangeText(al) {
+    if (al.plotKind === 'discrete') return String(al.value);
+    if (!condNeedsValue(al.condition)) return '';
     return al.condition === 'in_range' || al.condition === 'out_range'
       ? fmtNum(al.value) + ' ~ ' + fmtNum(al.value2)
       : fmtNum(al.value);
   }
 
   function describe(al) {
-    return (al.plotTitle || '指标') + ' ' + condLabel(al.condition) + ' ' + rangeText(al);
+    var head = (al.plotTitle || '指标') + ' ' + condLabel(al.condition);
+    var tail = rangeText(al);
+    return tail ? head + ' ' + tail : head;
   }
 
   /** 占位符取值表；键全部小写，未命中占位符原样保留（方便用户发现拼错） */
@@ -344,6 +505,7 @@
       study: al.studyName,
       plot: vars.plot,
       condition: al.condition,
+      kind: al.plotKind || 'numeric',
       value: cur,
       threshold: al.value,
       threshold2: al.value2,
@@ -394,7 +556,10 @@
         rt.firedForBar = al.lastBarTime === ser.time;
       }
       if (rt.firedForBar) { rt.status = '就绪（本根已触发）'; continue; }
-      if (!evalCond(al.condition, prev, cur, Number(al.value), Number(al.value2))) {
+      var hit = al.plotKind === 'discrete'
+        ? evalChangedTo(prev, cur, al.value)
+        : evalCond(al.condition, prev, cur, Number(al.value), Number(al.value2));
+      if (!hit) {
         rt.status = '就绪';
         continue;
       }
@@ -540,8 +705,9 @@
     studyId: '',
     plotIndex: 0,
     condition: 'cross_up',
-    value: 70,
-    value2: 30,
+    value: '',
+    value2: '',
+    dvalue: '',
     msgTitle: DEFAULT_TITLE,
     msgBody: DEFAULT_BODY,
     notifySystem: true,
@@ -890,47 +1056,102 @@
     var current = meta.filter(function (s) { return s.id === FORM.studyId; })[0] || meta[0];
     if (FORM.plotIndex >= current.plots.length) FORM.plotIndex = 0;
 
-    // ---- 条件：指标 → 该指标定义的条件（曲线）→ 比较方式
+    // ---- 条件：指标 → 该指标自己的输出列 → 按输出类型给条件
+    // 这里只列「客户端真能读到的输出列」。Pine 的 alertcondition 名字由服务端保存、
+    // 由服务端评估，客户端既没有名字也没有布尔序列（搜索接口只给数量，
+    // 如 stats:{alertcondition:6}），所以不可能把 alertcondition 列进来。
+    var curPlot = current.plots[FORM.plotIndex] || current.plots[0];
+
     var studySel = selectEl(meta.map(function (s) {
       return { value: s.id, label: s.name + (s.inputs.length ? '（' + inputsText(s.inputs) + '）' : '') };
     }), FORM.studyId);
     studySel.addEventListener('change', function () {
       FORM.studyId = studySel.value;
       FORM.plotIndex = 0;
+      FORM.value = '';
+      FORM.dvalue = '';
       renderForm();
     });
 
     var plotSel = selectEl(current.plots.map(function (p) {
-      return { value: p.index, label: p.title + '（当前 ' + fmtNum(p.value) + '）' };
+      var tag = p.kind === 'discrete' ? '｜状态列' : (p.kind === 'shape' ? '｜图形·不可读' : '');
+      var now = p.kind === 'discrete' ? String(p.value) : fmtNum(p.value);
+      return { value: p.index, label: p.title + tag + '　当前 ' + now };
     }), FORM.plotIndex);
     plotSel.addEventListener('change', function () {
       FORM.plotIndex = Number(plotSel.value);
+      FORM.value = '';
+      FORM.dvalue = '';
+      renderForm(); // 输出类型变了，下面控件必须跟着换
     });
-
-    var condSel = selectEl(CONDS.map(function (c) { return { value: c.id, label: c.label }; }), FORM.condition);
-    var valueInput = inputEl(FORM.value, 'number', 'any');
-    var value2Input = inputEl(FORM.value2, 'number', 'any');
 
     var condGrid = el('div', 'tvxa-two');
     condGrid.appendChild(field('指标', studySel));
-    condGrid.appendChild(field('条件（该指标定义的输出）', plotSel));
+    condGrid.appendChild(field('条件', plotSel));
 
     var opGrid = el('div', 'tvxa-three');
-    opGrid.appendChild(field('比较方式', condSel));
-    var vWrap = field('阈值', valueInput);
-    var v2Wrap = field('上限（区间条件用）', value2Input);
-    opGrid.appendChild(vWrap);
-    opGrid.appendChild(v2Wrap);
-    var isRange = FORM.condition === 'in_range' || FORM.condition === 'out_range';
-    v2Wrap.style.display = isRange ? '' : 'none';
-    condSel.addEventListener('change', function () {
-      FORM.condition = condSel.value;
-      isRange = FORM.condition === 'in_range' || FORM.condition === 'out_range';
-      v2Wrap.style.display = isRange ? '' : 'none';
-    });
+    var numCondSel = null;
+    var discreteSel = null;
+    var valueInput = null;
+    var value2Input = null;
+    var v2Wrap = null;
+    var isRange = false;
+    var condHint = '';
 
-    var condSection = section('条件', [condGrid, opGrid],
-      '先选指标，再选它自己的输出（如 RSI 的 RSI、布林带的上/下轨）。');
+    if (!curPlot || curPlot.kind === 'shape') {
+      opGrid.style.display = 'none';
+      condHint = '这个输出是图上画的图形信号，没有可读的数值列，不能作为条件。换一个输出。';
+    } else if (curPlot.kind === 'discrete') {
+      var choices = (curPlot.choices || []).slice();
+      var curStr = String(curPlot.value);
+      var has = function (c) { return String(c) === curStr; };
+      if (!choices.some(has)) choices.push(curPlot.value);
+      var want = FORM.dvalue ? String(FORM.dvalue) : curStr;
+      if (!choices.some(function (c) { return String(c) === want; })) choices.push(want);
+      FORM.dvalue = want;
+      discreteSel = selectEl(choices.map(function (c) {
+        var hex = typeof curPlot.color === 'function' ? curPlot.color(c) : null;
+        var cnt = curPlot.counts ? curPlot.counts[String(c)] : 0;
+        return {
+          value: String(c),
+          label: '值 ' + c + (hex ? '（' + hex + '）' : '') + (cnt ? ' · 近 400 根出现 ' + cnt + ' 次' : '')
+        };
+      }), FORM.dvalue);
+      discreteSel.addEventListener('change', function () { FORM.dvalue = discreteSel.value; });
+      opGrid.appendChild(field('触发条件', discreteSel));
+      condHint = '这是指标算好的离散状态列（如涨跌着色）：只在「从别的值变成这个值」时触发，没有阈值。';
+    } else {
+      numCondSel = selectEl(CONDS.map(function (c) { return { value: c.id, label: c.label }; }), FORM.condition);
+      valueInput = inputEl(FORM.value, 'number', 'any');
+      if (FORM.value === undefined || FORM.value === '' || !isFinite(Number(FORM.value))) {
+        valueInput.value = fmtNum(curPlot.value);
+      }
+      value2Input = inputEl(FORM.value2, 'number', 'any');
+      opGrid.appendChild(field('比较方式', numCondSel));
+      var v1Wrap = field('阈值', valueInput);
+      opGrid.appendChild(v1Wrap);
+      v2Wrap = field('上限（区间条件用）', value2Input);
+      opGrid.appendChild(v2Wrap);
+      var syncOps = function () {
+        var need = condNeedsValue(FORM.condition);
+        isRange = need && (FORM.condition === 'in_range' || FORM.condition === 'out_range');
+        v1Wrap.style.display = need ? '' : 'none';
+        v2Wrap.style.display = isRange ? '' : 'none';
+      };
+      FORM.condition = numCondSel.value;
+      syncOps();
+      numCondSel.addEventListener('change', function () {
+        FORM.condition = numCondSel.value;
+        syncOps();
+      });
+      condHint = '数值列需要比较方式与阈值；阈值默认填当前值，改成你要的水平。';
+    }
+
+    if (current.serverConds > 0) {
+      condHint += ' 该脚本另声明了 ' + current.serverConds +
+        ' 个服务端报警条件（alertcondition）：名字和触发值都在服务端，客户端读不到，所以这里列不出来。';
+    }
+    var condSection = section('条件', [condGrid, opGrid], condHint);
 
     // ---- 周期和触发：不做输入，只标注与图表一致
     var info = el('div', 'tvxa-info');
@@ -1011,24 +1232,38 @@
 
     var actions = el('div', 'tvxa-actions');
     actions.appendChild(btn('创建报警', 'primary', function () {
-      FORM.value = Number(valueInput.value);
-      FORM.value2 = Number(value2Input.value);
+      var kind = curPlot ? curPlot.kind : 'numeric';
       FORM.msgTitle = titleInput.value;
       FORM.msgBody = bodyInput.value;
       FORM.notifySystem = !!sysChk.checked;
       FORM.notifyEmail = !!mailChk.checked;
       FORM.emailFrom = fromInput.value.trim();
       FORM.emailTo = toInput.value.trim();
-      if (FORM.condition === 'in_range' || FORM.condition === 'out_range') {
-        if (!isFinite(FORM.value) || !isFinite(FORM.value2)) {
-          showBanner('区间条件需要填写两个数值', true);
-          return;
-        }
-      } else if (!isFinite(FORM.value)) {
-        showBanner('阈值必须是数字', true);
+      if (!curPlot || kind === 'shape') {
+        showBanner('这个输出不能作为条件，换一个输出', true);
         return;
       }
-      var plot = current.plots[FORM.plotIndex] || current.plots[0] || { index: 0, title: '' };
+      if (kind === 'discrete') {
+        FORM.condition = COND_CHANGED;
+        FORM.value = String(discreteSel.value);
+        FORM.value2 = '';
+      } else {
+        FORM.value = Number(valueInput.value);
+        FORM.value2 = Number(value2Input.value);
+        if (!condNeedsValue(FORM.condition)) {
+          FORM.value = 0;
+          FORM.value2 = 0;
+        } else if (FORM.condition === 'in_range' || FORM.condition === 'out_range') {
+          if (!isFinite(FORM.value) || !isFinite(FORM.value2)) {
+            showBanner('区间条件需要填写两个数值', true);
+            return;
+          }
+        } else if (!isFinite(FORM.value)) {
+          showBanner('阈值必须是数字', true);
+          return;
+        }
+      }
+      var plot = curPlot;
       var notify = [];
       if (FORM.notifySystem) notify.push('system');
       if (FORM.notifyEmail) notify.push('email');
@@ -1041,6 +1276,8 @@
         studyInputs: current.inputs,
         plotIndex: plot.index,
         plotTitle: plot.title,
+        plotKind: kind,
+        plotType: plot.type,
         condition: FORM.condition,
         value: FORM.value,
         value2: FORM.value2,

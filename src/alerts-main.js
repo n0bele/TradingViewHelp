@@ -34,7 +34,8 @@ const COND_LABEL = {
   gt: '大于',
   lt: '小于',
   in_range: '进入区间',
-  out_range: '离开区间'
+  out_range: '离开区间',
+  changed_to: '变为'
 };
 
 function cfgPath() {

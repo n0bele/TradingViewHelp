@@ -1047,8 +1047,15 @@ mod tests {
         for s in ["条件", "周期和触发", "消息", "通知"] {
             assert!(ALERTS_ENGINE_JS.contains(s), "设置页缺少分组：{s}");
         }
-        // 条件必须能级联到「指标自己定义的输出」
-        assert!(ALERTS_ENGINE_JS.contains("条件（该指标定义的输出）"));
+        // 条件必须来自指标真实的输出列（metainfo.plots），而不是界面上看得到的名字。
+        // 实测：metainfo 里只有 plots/inputs/styles，没有 alertcondition；colorer 占数据列
+        // 但不在 valuesProvider 里，na 交替列要靠「出现/消失」表达。
+        assert!(ALERTS_ENGINE_JS.contains("_metaInfo"), "条件要读指标的元数据");
+        assert!(ALERTS_ENGINE_JS.contains("COL_TYPES"), "要按 plot 类型把不占数据列的条目分开");
+        assert!(ALERTS_ENGINE_JS.contains("alertcondition"), "要识别服务端 alertcondition 并说明读不到");
+        assert!(ALERTS_ENGINE_JS.contains("evalChangedTo"), "colorer 状态列按「变为」求值");
+        assert!(ALERTS_ENGINE_JS.contains("disappear"), "na 交替列要能用出现/消失表达");
+        assert!(ALERTS_ENGINE_JS.contains("serverConds"), "要告诉用户脚本还有几个服务端条件");
         // 周期/触发不单独设置，只标注与图表一致
         assert!(ALERTS_ENGINE_JS.contains("与图表一致"));
         assert!(!ALERTS_ENGINE_JS.contains("冷却（分钟"), "触发频次不再暴露给用户");
