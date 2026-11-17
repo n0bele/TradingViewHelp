@@ -139,6 +139,89 @@
     }
   }
 
+  /**
+   * 一个指标实例的元数据不止一处：StudyApi / `_study._metaInfo` / 图表模型里的 dataSource。
+   * 条件名（alertConditions）与输出列定义可能只出现在其中某一个上，少读一个就会
+   * 出现「脚本明明声明了条件，面板却只列出一堆无关输出」。
+   * 这里只收**图表上这个实例**的来源，绝不按名字去公开脚本库找替身。
+   */
+  function metaSources(a, api, st, id) {
+    var out = [];
+    function push(src, v) {
+      if (!v || typeof v !== 'object') return;
+      for (var i = 0; i < out.length; i++) if (out[i].v === v) return;
+      out.push({ src: src, v: v });
+    }
+    push('study._metaInfo', metaValue(st));
+    try {
+      if (st && typeof st.metaInfo === 'function') push('study.metaInfo()', st.metaInfo());
+    } catch (e) {}
+    try {
+      if (api && typeof api.metaInfo === 'function') push('api.metaInfo()', api.metaInfo());
+    } catch (e) {}
+    try {
+      if (api && api._metaInfo) push('api._metaInfo', metaValue(api));
+    } catch (e) {}
+    try {
+      var m = a._chartWidget && typeof a._chartWidget.model === 'function' ? a._chartWidget.model() : null;
+      if (m && typeof m.model === 'function') m = m.model();
+      var ds = null;
+      if (m && typeof m.dataSourceForId === 'function') ds = m.dataSourceForId(id);
+      if (!ds && m && typeof m.dataSources === 'function') {
+        var arr = m.dataSources() || [];
+        for (var i2 = 0; i2 < arr.length; i2++) {
+          var did = '';
+          try { did = typeof arr[i2].id === 'function' ? String(arr[i2].id()) : String(arr[i2]._id || ''); } catch (e2) {}
+          if (did && did === String(id)) { ds = arr[i2]; break; }
+        }
+      }
+      if (ds) {
+        try { if (typeof ds.metaInfo === 'function') push('ds.metaInfo()', ds.metaInfo()); } catch (e3) {}
+        push('ds._metaInfo', metaValue(ds));
+      }
+    } catch (e4) {}
+    return out;
+  }
+
+  /**
+   * 原生「创建警报」对话框的条件名就来自这里：presentationData.alertConditions[alertCondId].title
+   * （chart-alerts-facade 里 `t?.alertConditions?.[e]` 的用法）。它是映射表，不是数组。
+   */
+  function alertCondList(mi) {
+    var out = [];
+    if (!mi) return out;
+    var ac = mi.alertConditions || mi.alert_conditions || mi.alertconditions;
+    if (!ac) return out;
+    try {
+      if (Object.prototype.toString.call(ac) === '[object Array]') {
+        for (var i = 0; i < ac.length; i++) {
+          var it = ac[i];
+          var t = (typeof it === 'string') ? it : String((it && (it.title || it.name)) || '');
+          if (t) out.push({ id: String((it && it.id) || ('ac' + i)), title: t });
+        }
+      } else if (typeof ac === 'object') {
+        var keys = Object.keys(ac);
+        for (var k = 0; k < keys.length; k++) {
+          var e = ac[keys[k]];
+          var t2 = (typeof e === 'string') ? e : String((e && (e.title || e.name)) || '');
+          if (t2) out.push({ id: keys[k], title: t2 });
+        }
+      }
+    } catch (e5) {}
+    return out;
+  }
+
+  /** 选哪个来源当主元数据：有 alertConditions 的最可信，其次要有 plots / styles */
+  function metaScore(v) {
+    if (!v) return -1;
+    var s = 0;
+    if (v.plots && v.plots.length) s += 2;
+    if (v.styles) s += 1;
+    if (v.fullId) s += 1;
+    if (alertCondList(v).length) s += 4;
+    return s;
+  }
+
   /** plot 类型 → 条件类别：离散（colorer）、图形（plotshape，不占数据列）、数值 */
   function kindOf(type) {
     if (type === 'colorer' || type === 'text_colorer') return 'discrete';
@@ -405,14 +488,16 @@
 
   // ---------------------------------------------------------- 脚本条件（源码兜底）
   //
-  // 免费账号的客户端 metainfo 不一定带 alertcondition 条目（技术报警属于付费能力），
-  // 这时按指标名去公开脚本库找同名脚本、读它的源码，把 alertcondition(...) 的条件名
-  // 原样取出来。名字与原生「创建警报」对话框一致，客户端再按名字映射到图上可读的信号。
-  // 版本号变了就作废旧缓存：v1 曾把 AlgoAlpha 的条件错误地挂到别人的同名脚本上
-  var PINE_KEY = 'tvx-pine-conds-v2';
+  // 元数据里完全没有条件名时，才按**这个实例的脚本 id** 去读它自己的源码，把
+  // alertcondition(...) 的条件名原样取出来。绝不按指标名去公开库搜同名脚本：
+  // "…[MergeAlerts]" 这类改名副本与公开版条件并不相同，按名字会拿到别人的条件。
+  // 版本号变更即作废旧缓存：v1/v2 曾按名字命中过 AlgoAlpha 的同名公开脚本
+  var PINE_KEY = 'tvx-pine-conds-v3';
   var PINE_MEM = null;
   var PINE_BUSY = Object.create(null);
   var PINE_FAIL = Object.create(null);
+  // 指标刚加到图上时元数据可能还没到；按次数限流地重读几次，避免一直停在输出列
+  var META_WAIT = Object.create(null);
 
   function pineCache() {
     if (PINE_MEM) return PINE_MEM;
@@ -421,14 +506,6 @@
   }
   function pineSave() {
     try { localStorage.setItem(PINE_KEY, JSON.stringify(pineCache())); } catch (e) {}
-  }
-  function normName(s) {
-    return String(s || '').toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
-  }
-  /** 脚本名末尾的 [作者]，例如 "Machine Learning Adaptive SuperTrend [MergeAlerts]" */
-  function authorOf(name) {
-    var m = /\[\s*([^\[\]]+?)\s*\]\s*$/.exec(String(name || ''));
-    return m ? m[1] : '';
   }
   /** 像 Pine 脚本名（够长且有空格）；Volume / RSI / MACD 这类内置名不会命中 */
   function looksLikeScript(name) {
@@ -487,55 +564,8 @@
         var list = parsePineConds(String((meta && meta.source) || ''));
         if (!list.length) return null;
         cache[key] = list;
-        var sn = String((meta && meta.scriptName) || '');
-        if (sn) cache[sn] = list; // 同名命中，后续直接可用
         pineSave();
         return list;
-      })
-      .then(done)
-      .catch(function () { done(null); });
-  }
-
-  /** 按名字去公开脚本库找（只对公开脚本有效；名字带 [作者] 时作者必须一致） */
-  function fetchPineConds(name, cb) {
-    var cache = pineCache();
-    if (cache[name]) { cb(cache[name]); return; }
-    if (PINE_BUSY[name]) return;
-    PINE_BUSY[name] = true;
-    var want = normName(name);
-    var wantAuthor = normName(authorOf(name));
-    var done = function (list) {
-      PINE_BUSY[name] = false;
-      if (!list) PINE_FAIL[name] = true;
-      cb(list || null);
-    };
-    var q = String(name).replace(/\[[^\]]*\]/g, ' ').replace(/[^\w\s.-]+/g, ' ').replace(/\s+/g, ' ').trim();
-    fetch('/pubscripts-suggest-json/?search=' + encodeURIComponent(q))
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        var arr = (j && (j.results || j)) || [];
-        var hit = null;
-        var loose = null;
-        for (var i = 0; i < arr.length; i++) {
-          var it = arr[i];
-          var cands = [it.scriptName, it.title, it.shortTitle];
-          var nameOk = false;
-          for (var c2 = 0; c2 < cands.length; c2++) {
-            var n = normName(cands[c2]);
-            if (!n || n.length < 6) continue;
-            if (n === want || n.indexOf(want) >= 0 || want.indexOf(n) >= 0) { nameOk = true; break; }
-          }
-          if (!nameOk) continue;
-          var au = normName((it.author && (it.author.username || it.author.name)) || '');
-          // 图表名带 [作者]：作者不一致就是别人改过的副本，条件名不能拿它的
-          if (wantAuthor && au && au !== wantAuthor) { if (!loose) loose = it; continue; }
-          hit = it;
-          break;
-        }
-        if (!hit && !wantAuthor) hit = loose;
-        if (!hit) return null;
-        var sid = hit.scriptIdPart || hit.id;
-        return new Promise(function (res) { fetchSourceConds(sid, res); });
       })
       .then(done)
       .catch(function () { done(null); });
@@ -567,7 +597,8 @@
         id: String(id), name: name, inputs: [], plots: [], conds: [],
         ok: false, note: '', serverConds: 0, condCols: false,
         needPine: false, condFromSource: false,
-        scriptId: '', fullId: '', miKeys: '', pending: false
+        scriptId: '', fullId: '', miKeys: '', pending: false,
+        miFrom: '', miSrcs: '', metaConds: 0, apiKeys: ''
       };
       try {
         var api = a.getStudyById(id);
@@ -577,15 +608,45 @@
         }
         var st = api && api._study;
         var d = plotList(st);
-        var mi = metaValue(st) || {};
+        // 诊断：StudyApi 上哪些字段与元数据/报警相关（不同编译版本位置不同）
+        try {
+          var aks = [];
+          for (var ak2 in api) if (/meta|alert|cond|present/i.test(ak2)) aks.push(ak2);
+          row.apiKeys = aks.slice(0, 30).join(',');
+        } catch (e6) {}
+        // 图上这个实例的所有元数据视图（StudyApi / _study / 图表模型 dataSource）
+        var srcs = metaSources(a, api, st, id);
+        var mi = {};
+        var bestScore = -1;
+        var miFrom = '';
+        for (var sc1 = 0; sc1 < srcs.length; sc1++) {
+          var scv = metaScore(srcs[sc1].v);
+          if (scv > bestScore) { bestScore = scv; mi = srcs[sc1].v; miFrom = srcs[sc1].src; }
+        }
+        row.miFrom = miFrom;
+        row.miSrcs = srcs.map(function (x) { return x.src; }).join(',');
         var defs = mi.plots || [];
         var styles = mi.styles || {};
+        // 条件名可能只挂在其中一个视图上：全部收上来按顺序去重
+        var metaConds = [];
+        for (var sc3 = 0; sc3 < srcs.length; sc3++) {
+          var cl = alertCondList(srcs[sc3].v);
+          for (var c3 = 0; c3 < cl.length; c3++) {
+            var dup = false;
+            for (var mc = 0; mc < metaConds.length; mc++) if (metaConds[mc].title === cl[c3].title) { dup = true; break; }
+            if (!dup) metaConds.push(cl[c3]);
+          }
+        }
+        row.metaConds = metaConds.length;
         // 脚本 id：元数据里一定有，用来直接读「这个脚本自己」的源码，而不是同名公开脚本
         try {
           row.miKeys = Object.keys(mi).join(',');
           row.fullId = String(mi.fullId || '');
-          var miJson = JSON.stringify(mi);
-          var sm = /(?:^|[^A-Za-z0-9])((?:PUB|USER);[0-9a-fA-F]{32})/.exec(miJson);
+          var blob = '';
+          for (var sb = 0; sb < srcs.length; sb++) {
+            try { blob += JSON.stringify(srcs[sb].v); } catch (e0) {}
+          }
+          var sm = /(?:^|[^A-Za-z0-9])((?:PUB|USER);[0-9a-fA-F]{32})/.exec(blob);
           if (sm) row.scriptId = sm[1];
           else if (/^(PUB|USER);[0-9a-fA-F]{32}/.test(row.fullId)) row.scriptId = row.fullId.split('@')[0];
           // 自检用：把元数据里任何带 alert/cond 的字段原样记下来，
@@ -662,22 +723,12 @@
             }
             row.plots = items;
 
-            // 少数编译版本把条件单独放在 alertConditions 字段，而不是 plots 里
-            var listedConds = [];
-            try {
-              var ac = mi.alertConditions || mi.alert_conditions || mi.alertconditions;
-              if (ac && ac.length) {
-                for (var ai = 0; ai < ac.length; ai++) {
-                  var a0 = ac[ai];
-                  var t0 = (typeof a0 === 'string') ? a0 : String((a0 && (a0.title || a0.name)) || '');
-                  if (t0) listedConds.push(t0);
-                }
-              }
-            } catch (e) {}
-
             // 任何时候都先备一份「按输出列」的兜底条件，避免脚本源码读不到时面板一片空白
             var plotConds = [];
-            var scriptLike = looksLikeScript(name);
+            // 是不是 Pine 脚本：有脚本 id 就是；否则看 fullId（内置指标是 @tv-basicstudies-…，
+            // Pine 脚本是 @tv-scripting-js），都没有才退回按名字长短判断
+            var scriptLike = !!row.scriptId ||
+              (row.fullId ? /tv-scripting/i.test(row.fullId) : looksLikeScript(name));
             for (var ii0 = 0; ii0 < items.length; ii0++) {
               var it0 = items[ii0];
               if (it0.kind === 'shape') {
@@ -700,31 +751,33 @@
               });
             }
 
-            var srcConds = pineCache()[name] || (row.scriptId ? pineCache()['id:' + row.scriptId] : null);
-            if (listedConds.length) {
-              // 元数据自带条件名：最权威（与原生对话框同源）
-              row.condFromSource = false;
-              for (var li2 = 0; li2 < listedConds.length; li2++) {
-                row.conds.push(buildCond(
-                  { id: 'ac_' + li2, type: 'alertcondition' },
-                  listedConds[li2], li2, items, false, defs, d
-                ));
-              }
-            } else if (condDefs.length) {
-              // 元数据里就有 alertcondition：优先用它的名字与顺序（与客户端原生对话框同源）。
-              // 个别编译产物会把标题留成 plot_19 这种占位名，这时按同序号用脚本源码的名字补。
+            var srcConds = row.scriptId ? pineCache()['id:' + row.scriptId] : null;
+            if (condDefs.length) {
+              // plots 里就有 alertcondition：按它的 id 定位数据列最准。
+              // 名字优先 styles[plotId].title，占位名（plot_19）时用实例的 alertConditions、
+              // 再不行用脚本源码同序号的名字补。
               for (var ci = 0; ci < condDefs.length; ci++) {
                 var cd = condDefs[ci];
                 var cTitle = (styles[cd.id] && styles[cd.id].title) || '';
                 if (!cTitle || /^plot_\d+$/i.test(String(cTitle))) {
-                  cTitle = (srcConds && srcConds[ci] && srcConds[ci].title) || ('条件 ' + (ci + 1));
-                  if (srcConds && srcConds[ci]) row.condFromSource = true;
+                  cTitle = (metaConds[ci] && metaConds[ci].title) ||
+                    (srcConds && srcConds[ci] && srcConds[ci].title) || ('条件 ' + (ci + 1));
+                  if (srcConds && srcConds[ci] && !(metaConds[ci] && metaConds[ci].title)) row.condFromSource = true;
                 }
                 row.conds.push(buildCond(cd, cTitle, ci, items, row.condCols, defs, d));
               }
+            } else if (metaConds.length) {
+              // 这个实例自带 alertConditions（与原生「创建警报」对话框同一个来源）：
+              // 名字、条数、顺序都以它为准，不看它叫什么名字、是不是公开脚本。
+              row.condFromSource = false;
+              for (var li2 = 0; li2 < metaConds.length; li2++) {
+                row.conds.push(buildCond(
+                  { id: metaConds[li2].id, type: 'alertcondition' },
+                  metaConds[li2].title, li2, items, false, defs, d
+                ));
+              }
             } else if (srcConds && srcConds.length) {
-              // 元数据里没有 alertcondition（免费账号常见）：改用脚本源码里的条件名，
-              // 名字、条数、顺序与原生对话框一致
+              // 元数据里没有条件名：用**这个实例自己的脚本 id** 读到的源码条件名
               row.condFromSource = true;
               for (var si = 0; si < srcConds.length; si++) {
                 row.conds.push(buildCond(
@@ -735,14 +788,21 @@
             } else {
               // 内置指标（RSI / Volume / MACD…）没有条件名，按输出列给条件就够了
               row.conds = plotConds;
+              var metaLoaded = !!(defs && defs.length);
               if (scriptLike) {
                 // 脚本指标：先显示输出列 / 图形信号（别让面板空着），同时去读它自己的源码
-                var failed = row.scriptId ? PINE_FAIL['id:' + row.scriptId] : PINE_FAIL[name];
-                row.pending = !failed;
+                var failed = row.scriptId ? PINE_FAIL['id:' + row.scriptId] : false;
+                var waited = META_WAIT['w:' + row.id] || 0;
+                // 没有脚本 id 时不去猜（绝不按名字搜公开库）；元数据还没到时限流重读几次
+                row.pending = !failed && (!!row.scriptId || (!metaLoaded && waited < 4));
                 row.needPine = row.pending;
                 row.note = (row.note ? row.note + '；' : '') + (failed
                   ? '没读到这个脚本的源码（不是公开脚本，或当前账号无权限），下面列出的是它在图上的输出与图形信号'
-                  : '条件名还在读取，当前列出的是指标输出列与图形信号');
+                  : (row.scriptId
+                    ? '条件名还在读取，当前列出的是指标输出列与图形信号'
+                    : (!metaLoaded
+                      ? '正在读取这个指标实例的元数据…'
+                      : '没拿到这个脚本在图上的脚本 id，只能按它的输出列与图形信号列条件')));
               }
             }
           }
@@ -781,9 +841,22 @@
     return true;
   }
 
+  /**
+   * 指标参数的可读摘要：只留人能看懂的输入。
+   * Pine 的 getInputValues() 里混着 pineId / pineVersion / pineFeatures / in_0… 这些内部项，
+   * 还可能带一大坨 base64 长文本（脚本自己的配置串），原样显示会糊满整行。
+   */
   function inputsText(inputs) {
     if (!inputs || !inputs.length) return '';
-    return inputs.map(function (x) { return x.id + '=' + x.value; }).join(', ');
+    var out = [];
+    for (var i = 0; i < inputs.length; i++) {
+      var id = String((inputs[i] && inputs[i].id) || '');
+      if (!id || /^(pine|__|in_\d|in$)/i.test(id)) continue;
+      var v = String(inputs[i].value);
+      if (v.length > 32) continue;
+      out.push(id + '=' + v);
+    }
+    return out.join(', ');
   }
 
   /** 把一条报警对到当前图表上：品种 / 周期 / 指标（名字+参数）/ 曲线 */
@@ -925,13 +998,24 @@
     return v.toFixed(4);
   }
 
+  /** 阈值显示：跟图表报价一样去掉无意义的零，大数加千分位（70 而不是 70.000，10,000,000 而不是 10000000.00） */
+  function fmtThreshold(v) {
+    if (typeof v !== 'number' || !isFinite(v)) return String(v == null ? '' : v);
+    var abs = Math.abs(v);
+    var s = (Number.isInteger(v) || abs >= 1000) ? v.toFixed(2) : v.toFixed(4);
+    if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    var p = s.split('.');
+    p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return p.join('.');
+  }
+
   function rangeText(al) {
     if (al.condSource === 'alertcondition') return '';
     if (al.plotKind === 'discrete') return String(al.value);
     if (!condNeedsValue(al.condition)) return '';
     return al.condition === 'in_range' || al.condition === 'out_range'
-      ? fmtNum(al.value) + ' ~ ' + fmtNum(al.value2)
-      : fmtNum(al.value);
+      ? fmtThreshold(al.value) + ' ~ ' + fmtThreshold(al.value2)
+      : fmtThreshold(al.value);
   }
 
   function describe(al) {
@@ -1095,15 +1179,12 @@
         for (var i = 0; i < CFG.alerts.length; i++) if (CFG.alerts[i].id === ref.id) { al = CFG.alerts[i]; break; }
         if (!al) return;
         var chip = statusChip(al);
-        ref.chip.className = 'tvxa-chip ' + chip.cls;
-        ref.chip.textContent = chip.text;
-        var rt = state(al.id);
-        var bits = [];
-        if (rt.value != null) bits.push('当前值 ' + fmtNum(rt.value));
-        if (al.lastFiredAt) bits.push('上次触发 ' + new Date(al.lastFiredAt).toLocaleString());
-        if (al.notify && al.notify.indexOf('email') >= 0) bits.push('系统+邮件');
-        else bits.push('仅系统');
-        ref.line.textContent = bits.join(' · ');
+        if (ref.dot) ref.dot.className = 'tvxa-adot ' + chip.cls;
+        if (ref.chip) {
+          ref.chip.className = 'tvxa-chip ' + chip.cls;
+          ref.chip.textContent = chip.text;
+        }
+        if (ref.time) ref.time.textContent = agoText(al.lastFiredAt);
       });
     }
   }
@@ -1304,10 +1385,27 @@
       '.tvxa-body{padding:12px 14px 16px;overflow:auto;flex:1}',
       '.tvxa-section{border:1px solid #2a2e39;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#1b1f29}',
       '.tvxa-sec-title{font-size:12px;font-weight:600;color:#e6e8ec;margin-bottom:6px;letter-spacing:.3px}',
-      '.tvxa-row{border:1px solid #2a2e39;border-radius:8px;padding:10px;margin-bottom:8px;background:#22262f}',
-      '.tvxa-row-head{display:flex;align-items:center;gap:8px}',
-      '.tvxa-row-title{flex:1;font-weight:600;color:#e6e8ec;font-size:13px}',
-      '.tvxa-row-sub{color:#9aa0aa;font-size:12px;margin-top:4px;white-space:pre-wrap}',
+      // 报警列表：照原生「警报」列表的样子——一行一条、无卡片框、细节收进展开区
+      '.tvxa-listhead{font-size:11px;color:#787b86;padding:2px 2px 6px;letter-spacing:.2px}',
+      '.tvxa-arow{border-bottom:1px solid #262a34}',
+      '.tvxa-arow:last-child{border-bottom:0}',
+      '.tvxa-arow.off{opacity:.62}',
+      '.tvxa-ahead{display:flex;align-items:center;gap:9px;padding:9px 4px;border-radius:6px;cursor:pointer}',
+      '.tvxa-ahead:hover{background:#232733}',
+      '.tvxa-adot{width:7px;height:7px;border-radius:50%;background:#787b86;flex:0 0 auto}',
+      '.tvxa-adot.ok{background:#26a69a}',
+      '.tvxa-adot.fire{background:#2962ff}',
+      '.tvxa-adot.warn{background:#e0a03a}',
+      '.tvxa-adot.off{background:#4a4e5a}',
+      '.tvxa-amain{flex:1;min-width:0}',
+      '.tvxa-atitle{font-size:13px;font-weight:600;color:#e6e8ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.tvxa-asub{font-size:11px;color:#787b86;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '.tvxa-aright{display:flex;align-items:center;gap:6px;flex:0 0 auto;color:#787b86;font-size:11px}',
+      '.tvxa-mini{background:transparent;border:0;color:#787b86;cursor:pointer;font:14px/1 inherit;padding:2px 5px;border-radius:4px}',
+      '.tvxa-mini:hover{background:#333846;color:#d1d4dc}',
+      '.tvxa-adetail{display:none;padding:2px 4px 10px 22px;font-size:12px;color:#9aa0aa}',
+      '.tvxa-arow.open .tvxa-adetail{display:block}',
+      '.tvxa-kv{margin-top:3px;line-height:1.5;word-break:break-word}',
       '.tvxa-chip{font-size:11px;padding:2px 7px;border-radius:10px;border:1px solid #3d4250;color:#a3a6af}',
       '.tvxa-chip.ok{color:#4caf50;border-color:#2e5c33}',
       '.tvxa-chip.warn{color:#e0a03a;border-color:#5c4a2a}',
@@ -1445,6 +1543,28 @@
     return { cls: 'warn', text: rt.status };
   }
 
+  /** 列表里的报警名，跟原生一样「条件为主，指标为辅」 */
+  function alertName(al) {
+    if (al.condSource === 'alertcondition') return String(al.condTitle || al.plotTitle || '脚本条件');
+    var tail = rangeText(al);
+    // 列表标题要短：「出现（从无到有）」这类括注只在设置页有用
+    var cl = condLabel(al.condition).replace(/（[^）]*）/g, '');
+    return String((al.plotTitle || '指标') + ' ' + cl + (tail ? ' ' + tail : ''));
+  }
+
+  /** 原生列表右侧那行时间：刚刚 / 12 分钟前 / 3 小时前 / 昨天 14:02 */
+  function agoText(ts) {
+    if (!ts) return '未触发';
+    var d = Date.now() - Number(ts);
+    if (!isFinite(d) || d < 0) return '未触发';
+    if (d < 60e3) return '刚刚';
+    if (d < 3600e3) return Math.floor(d / 60e3) + ' 分钟前';
+    if (d < 864e5) return Math.floor(d / 3600e3) + ' 小时前';
+    var dt = new Date(Number(ts));
+    var hh = ('0' + dt.getHours()).slice(-2) + ':' + ('0' + dt.getMinutes()).slice(-2);
+    return (d < 1728e5 ? '昨天 ' : (dt.getMonth() + 1) + '/' + dt.getDate() + ' ') + hh;
+  }
+
   function renderList() {
     if (!UI) return;
     var ctx = chartCtx();
@@ -1457,29 +1577,50 @@
       body.appendChild(el('div', 'tvxa-empty', '还没有报警。切到「新建报警」，用当前图表的指标建一条。'));
       return;
     }
+    // 与原生「警报」列表同样的结构：一行一条，左边状态点、中间标题+副标题、右边最近触发时间，
+    // 细节与操作收进展开区。指标参数只在展开区里显示可读项，绝不铺内部签名/长文本。
+    var head = el('div', 'tvxa-listhead', alerts.length + ' 条报警' +
+      (armedCount() !== alerts.length ? '（' + armedCount() + ' 条运行中）' : ''));
+    body.appendChild(head);
     alerts.forEach(function (al) {
-      var row = el('div', 'tvxa-row');
-      var head = el('div', 'tvxa-row-head');
-      var title = el('div', 'tvxa-row-title', (al.studyName || '') + ' · ' + (al.plotTitle || ''));
       var chip = statusChip(al);
-      var chipEl = el('span', 'tvxa-chip ' + chip.cls, chip.text);
-      head.appendChild(title);
-      head.appendChild(chipEl);
-      row.appendChild(head);
-      row.appendChild(el('div', 'tvxa-row-sub',
-        al.symbol + ' · ' + al.resolution + ' · ' + describe(al) +
-        (al.studyInputs && al.studyInputs.length ? ' · ' + inputsText(al.studyInputs) : '')));
-      if (al.msgTitle) {
-        row.appendChild(el('div', 'tvxa-row-sub', '消息标题：' + al.msgTitle));
-      }
+      var row = el('div', 'tvxa-arow' + (al.enabled ? '' : ' off'));
+      var bar = el('div', 'tvxa-ahead');
+      var dot = el('span', 'tvxa-adot ' + chip.cls);
+      var main = el('div', 'tvxa-amain');
+      main.appendChild(el('div', 'tvxa-atitle', alertName(al)));
+      var sub = [];
+      if (al.symbol) sub.push(al.symbol);
+      if (al.resolution) sub.push(String(al.resolution));
+      if (al.studyName) sub.push(al.studyName);
+      main.appendChild(el('div', 'tvxa-asub', sub.join(' · ')));
+      var right = el('div', 'tvxa-aright');
+      var time = el('div', 'tvxa-atime', agoText(al.lastFiredAt));
+      var more = el('button', 'tvxa-mini', '⋯');
+      more.type = 'button';
+      more.title = '详情与操作';
+      right.appendChild(time);
+      right.appendChild(more);
+      bar.appendChild(dot);
+      bar.appendChild(main);
+      bar.appendChild(right);
+      row.appendChild(bar);
+
+      var detail = el('div', 'tvxa-adetail');
       var rt = state(al.id);
-      var extra = [];
-      if (rt.value != null) extra.push('当前值 ' + fmtNum(rt.value));
-      if (al.lastFiredAt) extra.push('上次触发 ' + new Date(al.lastFiredAt).toLocaleString());
-      extra.push('通知：' + ((al.notify || []).indexOf('email') >= 0 ? '系统+邮件' : '系统'));
-      var line = el('div', 'tvxa-row-sub', extra.join(' · '));
-      row.appendChild(line);
-      UI.rows.push({ id: al.id, chip: chipEl, line: line });
+      var chipEl = el('span', 'tvxa-chip ' + chip.cls, chip.text);
+      var stLine = el('div', 'tvxa-kv', '状态：');
+      stLine.appendChild(chipEl);
+      detail.appendChild(stLine);
+      var bits = [];
+      bits.push('条件：' + describe(al));
+      if (rt.value != null) bits.push('当前值：' + fmtNum(rt.value));
+      if (al.lastFiredAt) bits.push('上次触发：' + new Date(al.lastFiredAt).toLocaleString());
+      bits.push('通知：' + ((al.notify || []).indexOf('email') >= 0 ? '系统 + 邮件' : '系统'));
+      for (var bi = 0; bi < bits.length; bi++) detail.appendChild(el('div', 'tvxa-kv', bits[bi]));
+      if (al.msgTitle) detail.appendChild(el('div', 'tvxa-kv', '消息：' + al.msgTitle));
+      var params = inputsText(al.studyInputs);
+      if (params) detail.appendChild(el('div', 'tvxa-kv', '参数：' + params));
 
       var acts = el('div', 'tvxa-actions');
       acts.appendChild(btn(al.enabled ? '停用' : '启用', '', function () {
@@ -1515,7 +1656,14 @@
         saveConfig();
         renderList();
       }));
-      row.appendChild(acts);
+      detail.appendChild(acts);
+      row.appendChild(detail);
+
+      var toggleRow = function () { row.classList.toggle('open'); };
+      bar.addEventListener('click', toggleRow);
+      more.addEventListener('click', function (e) { e.stopPropagation(); toggleRow(); });
+
+      UI.rows.push({ id: al.id, chip: chipEl, dot: dot, time: time });
       body.appendChild(row);
     });
   }
@@ -1550,24 +1698,26 @@
       FORM.studyId = meta[0].id;
       FORM.condIndex = 0;
     }
-    // 脚本指标若元数据里没有 alertcondition，按指标名去公开脚本库读源码补条件名，
+    // 脚本指标若元数据里没有条件名，按**这个实例自己的脚本 id**读它自己的源码补条件名，
     // 读完自渲染一次；失败则退回按输出列给条件，不会反复请求。
-    // 读到条件名后重渲染一次；先按脚本 id 读（不会认错脚本），id 拿不到才退回按名字搜
+    // 没有脚本 id 就不猜：绝不按指标名去公开库搜同名脚本（[MergeAlerts] 这类副本条件不同）
     var needList = meta.filter(function (s) { return s.pending; });
     for (var ni = 0; ni < needList.length; ni++) {
       (function (s) {
+        if (!s.scriptId) {
+          // 元数据可能还没到：重读一次实例元数据（限 4 次，不会打转）
+          var k = 'w:' + s.id;
+          META_WAIT[k] = (META_WAIT[k] || 0) + 1;
+          if (META_WAIT[k] <= 4) {
+            setTimeout(function () { if (UI && FORM.studyId === s.id) renderForm(); }, 1200);
+          }
+          return;
+        }
         var done = function (list) {
           // 成功或失败都重画一次：失败后标签要变成「输出列」并把原因写出来
           if (UI && FORM.studyId === s.id) renderForm();
         };
-        if (s.scriptId) {
-          fetchSourceConds(s.scriptId, function (list) {
-            if (list) { done(list); return; }
-            fetchPineConds(s.name, done);
-          });
-        } else {
-          fetchPineConds(s.name, done);
-        }
+        fetchSourceConds(s.scriptId, done);
       })(needList[ni]);
     }
 
@@ -1980,12 +2130,24 @@
       data.push({
         name: s.name, ok: s.ok, note: s.note, serverConds: s.serverConds,
         condCols: s.condCols, cols: s.plots.length, plots: plots, conds: items,
+        apiKeys: s.apiKeys || '', alertish: s.alertish || [],
         scriptId: s.scriptId || '', fullId: s.fullId || '', miKeys: s.miKeys || '',
+        miFrom: s.miFrom || '', miSrcs: s.miSrcs || '', metaConds: s.metaConds || 0,
         pending: !!s.pending, fromSource: !!s.condFromSource,
         plotTypes: s.plots.map(function (x) { return x.id + ':' + x.type; })
       });
     }
     var payload = { symbol: c.symbol, resolution: c.resolution, at: Date.now(), studies: data };
+    // 诊断：图表模型上哪些字段可能挂着「指标的呈现数据」（alertConditions 的真正来源）
+    try {
+      var w = c.a._chartWidget;
+      var m = w && typeof w.model === 'function' ? w.model() : null;
+      if (m && typeof m.model === 'function') m = m.model();
+      var mk = [];
+      if (m) for (var k in m) { if (/present|metainfo|study|alert/i.test(k)) mk.push(k); }
+      payload.modelKeys = mk.slice(0, 120).join(',');
+      payload.engineVer = 'v3-instance-only';
+    } catch (e) {}
     try {
       if (BR.dump) BR.dump(payload);
     } catch (e) {}
@@ -2019,8 +2181,22 @@
       bar: function () { return mainBar(chartCtx()); },
       studies: studies,
       dump: dumpStudies,
-      pine: function (name) { return pineCache()[name] || null; },
-      fetchPine: function (name) { return new Promise(function (r) { fetchPineConds(name, r); }); },
+      pine: function (sid) { return pineCache()['id:' + sid] || null; },
+      fetchPine: function (sid) { return new Promise(function (r) { fetchSourceConds(sid, r); }); },
+      /** 图上这个实例到底从哪些对象读到了元数据 / 条件名（排查用，不猜、不改图） */
+      meta: function (name) {
+        var m = studies();
+        var out = [];
+        for (var i = 0; i < m.length; i++) {
+          if (name && m[i].name !== name) continue;
+          out.push({
+            name: m[i].name, scriptId: m[i].scriptId, fullId: m[i].fullId,
+            srcs: m[i].miSrcs, from: m[i].miFrom, metaConds: m[i].metaConds,
+            conds: m[i].conds.map(function (x) { return x.title; })
+          });
+        }
+        return name ? (out[0] || null) : out;
+      },
       conds: function () {
         var m = studies();
         var out = [];

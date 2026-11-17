@@ -1084,20 +1084,28 @@ mod tests {
         assert!(ALERTS_ENGINE_JS.contains("disappear"), "na 交替列要能用出现/消失表达");
         assert!(ALERTS_ENGINE_JS.contains("serverConds"), "要告诉用户脚本还有几个服务端条件");
         // 免费账号的客户端 metainfo 常常不带 alertcondition（技术报警是付费能力）。
-        // 这时按指标名去公开脚本库找同名脚本、读源码，把 alertcondition 的名字原样取出来，
+        // 这时按**这个实例自己的脚本 id**读源码，把 alertcondition 的名字原样取出来，
         // 保证条件下拉仍是脚本真正声明的那几条，而不是一堆无关输出列。
         assert!(ALERTS_ENGINE_JS.contains("parsePineConds"), "要能从脚本源码解析条件名");
-        assert!(ALERTS_ENGINE_JS.contains("pubscripts-suggest-json"), "要能按指标名匹配公开脚本");
         assert!(ALERTS_ENGINE_JS.contains("pine-facade"), "要能取到脚本源码");
-        assert!(ALERTS_ENGINE_JS.contains("needPine"), "元数据缺 alertcondition 时要走源码兜底");
-        // 关键：图表上的指标名可能被别人改过（如 "…SuperTrend [MergeAlerts]" 不是 AlgoAlpha 那个
-        // 公开脚本），按名字搜索会拉错脚本、列出别人的条件名。必须优先用元数据里的脚本 id
-        // 直接读「这个脚本自己」的源码，并在名字带 [作者] 时校验作者。
+        assert!(ALERTS_ENGINE_JS.contains("needPine"), "元数据缺条件名时要走源码兜底");
+        // 关键：一切条件名必须来自「图表上这个指标实例」。
+        // 改名副本（如 "…SuperTrend [MergeAlerts]"）与公开版条件并不相同，按名字搜索会拉错脚本，
+        // 所以：① 多来源读该实例的元数据（alertConditions 与 plots 可能只挂在其中一处）；
+        //      ② 只按该实例的脚本 id 读源码；③ 明确禁止按名字去公开库猜。
         assert!(ALERTS_ENGINE_JS.contains("fetchSourceConds"), "要能按脚本 id 读它自己的源码");
         assert!(ALERTS_ENGINE_JS.contains("scriptId"), "要从元数据里取脚本 id");
-        assert!(ALERTS_ENGINE_JS.contains("authorOf"), "指标名带 [作者] 时要校验脚本作者");
+        assert!(ALERTS_ENGINE_JS.contains("metaSources"), "要读图上这个实例自己的元数据");
+        assert!(ALERTS_ENGINE_JS.contains("alertConditions"), "原生对话框的条件名就在 alertConditions 里");
+        assert!(!ALERTS_ENGINE_JS.contains("pubscripts-suggest-json"),
+            "条件名只能来自图上这个实例，不能按名字去公开脚本库猜");
         assert!(ALERTS_ENGINE_JS.contains("plotConds"), "读不到条件名时要用输出列兜底，不能空");
         assert!(ALERTS_ENGINE_JS.contains("输出列·过渡"), "读取期间要标明当前是过渡列表");
+        // 报警列表照原生「警报」列表做：一行一条、细节展开；指标参数只显示可读项，
+        // 绝不把 pineId / pineFeatures / in_0 / base64 长文本铺到列表里
+        assert!(ALERTS_ENGINE_JS.contains("tvxa-arow"), "列表要用原生那种紧凑行");
+        assert!(ALERTS_ENGINE_JS.contains("fmtThreshold"), "阈值显示要去掉多余的零并加千分位");
+        assert!(ALERTS_ENGINE_JS.contains("in_\\d"), "指标参数要过滤 Pine 内部输入项");
         assert!(ALERTS_ENGINE_JS.contains("tvx-pine-conds"), "条件名要缓存，别每次开面板都请求");
         assert!(ALERTS_MAIN_JS.contains("tvx-alerts:dump"), "自检转储通道");
         // 周期/触发不单独设置，只标注与图表一致
