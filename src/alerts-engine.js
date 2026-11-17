@@ -141,9 +141,51 @@
 
   /** plot 类型 → 条件类别：离散（colorer）、图形（plotshape，不占数据列）、数值 */
   function kindOf(type) {
-    if (type === 'colorer') return 'discrete';
-    if (type === 'plotshape' || type === 'plotchar' || type === 'shape' || type === 'chars') return 'shape';
+    if (type === 'colorer' || type === 'text_colorer') return 'discrete';
+    if (type === 'plotshape' || type === 'plotchar' || type === 'shapes' || type === 'shape' || type === 'chars') return 'shape';
+    if (type === 'alertcondition') return 'condition';
     return 'numeric';
+  }
+
+  // 会产出数据列的 plot 类型（其余类型不占列，列映射时必须先剔除，否则整体错位）
+  var COL_TYPES = {
+    line: 1, linebr: 1, stepline: 1, histogram: 1, area: 1, columns: 1,
+    colorer: 1, text_colorer: 1, data: 1
+  };
+
+  function isColType(t) {
+    return !!COL_TYPES[String(t || 'line')];
+  }
+
+  // 条件名归一化：去标点、去这类「后缀词」，让 "Bullish Trend Shift" 能对上 "Bullish Trend"
+  var NAME_STOP = {
+    shift: 1, shifts: 1, signal: 1, signals: 1, trigger: 1, triggers: 1,
+    alert: 1, alerts: 1, condition: 1, conditions: 1, the: 1, of: 1, and: 1
+  };
+
+  function nameWords(s) {
+    var raw = String(s || '').toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/);
+    var out = [];
+    for (var i = 0; i < raw.length; i++) if (raw[i] && !NAME_STOP[raw[i]]) out.push(raw[i]);
+    return out;
+  }
+
+  /** 两个名字的相似度：100 = 归一化后完全相同；0 = 无关 */
+  function nameScore(a, b) {
+    var wa = nameWords(a);
+    var wb = nameWords(b);
+    var x = wa.join('');
+    var y = wb.join('');
+    if (!x || !y) return 0;
+    if (x === y) return 100;
+    if (x.indexOf(y) === 0 || y.indexOf(x) === 0) {
+      return 80 + 10 * (Math.min(x.length, y.length) / Math.max(x.length, y.length));
+    }
+    var hit = 0;
+    for (var i = 0; i < wa.length; i++) if (wb.indexOf(wa[i]) >= 0) hit++;
+    if (!hit) return 0;
+    var jac = hit / (wa.length + wb.length - hit);
+    return jac >= 0.5 ? 40 + 40 * jac : 0;
   }
 
   function plotTitleOf(def, idx, titles, styles) {
@@ -187,18 +229,269 @@
     return arr;
   }
 
+  /** 单个数据列的描述（含离散列的历史取值枚举） */
+  function makeItem(def, k, v, d, mi, styles, titles) {
+    var kind = kindOf(def && def.type);
+    var item = {
+      index: k,
+      id: String((def && def.id) || ('col' + k)),
+      title: plotTitleOf(def, k, titles, styles),
+      type: String((def && def.type) || 'line'),
+      kind: kind,
+      value: v ? v[k + 1] : undefined
+    };
+    if (kind === 'discrete') {
+      var hist = columnHistory(d, k + 1, 400);
+      var seen = Object.create(null);
+      var choices = [];
+      for (var h = 0; h < hist.length; h++) {
+        var key = String(hist[h]);
+        if (!seen[key]) { seen[key] = 0; choices.push(hist[h]); }
+        seen[key]++;
+      }
+      item.choices = choices.slice(0, 12);
+      item.counts = seen;
+      item.color = paletteOf(mi, def);
+    }
+    return item;
+  }
+
   /**
-   * 指标的真实输出项。
+   * 某列是不是「na 交替」型：有明显的空段（上下轨这种只在一边有值），
+   * 且不是全程为空。判据用 15% 以上为空——SuperTrend 上下轨大约各占一半。
+   */
+  function isNaAlternating(d, col, n) {
+    try {
+      var li = d.lastIndex();
+      var from = Math.max(0, li - (n || 300) + 1);
+      var total = 0;
+      var na = 0;
+      var has = 0;
+      for (var i = from; i <= li; i++) {
+        total++;
+        var v = d.valueAt(i);
+        if (!isNum(v ? v[col] : null)) na++;
+        else has++;
+      }
+      return total >= 3 && has > 0 && na / total >= 0.15;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 方向词白名单（按词判断，避免 "Support" 里的 up 这种误命中）
+  var UP_WORDS = { bull: 1, bullish: 1, long: 1, longs: 1, buy: 1, up: 1, uptrend: 1, upmove: 1 };
+  var DOWN_WORDS = { bear: 1, bearish: 1, short: 1, shorts: 1, sell: 1, down: 1, downtrend: 1, downmove: 1 };
+
+  function dirTokens(s) {
+    return String(s || '')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .toLowerCase()
+      .split(/[^a-z0-9\u4e00-\u9fa5]+/)
+      .filter(function (w) { return !!w; });
+  }
+
+  function dirOfName(s) {
+    var w = dirTokens(s);
+    for (var i = 0; i < w.length; i++) {
+      if (UP_WORDS[w[i]] || /多|涨/.test(w[i])) return 'up';
+      if (DOWN_WORDS[w[i]] || /空|跌/.test(w[i])) return 'down';
+    }
+    return null;
+  }
+
+  function dirOfTitle(s) {
+    return dirOfName(s);
+  }
+
+  /**
+   * 把一个 alertcondition 落到客户端真能读到的信号上。
+   *   1) 它自己占数据列       → 直接读布尔（真值边沿）
+   *   2) 不占列 → 找同名输出：形状列 → 出现；状态列 → 切换；na 交替的线 → 出现
+   *   3) 名字对不上 → 用方向词（多/空）配 na 交替的上下轨
+   *   4) 都不行 → 标记不可用（服务端条件，客户端算不出来）
+   */
+  function buildCond(cd, title, ci, items, condCols, defs, d) {
+    var c = {
+      id: String(cd.id), index: ci, title: title, source: 'alertcondition',
+      kind: 'signal', col: null, mode: 'none', available: false, note: '', linkedTitle: ''
+    };
+    if (condCols) {
+      var pos = 0;
+      for (var i = 0; i < defs.length; i++) {
+        var dd = defs[i] || {};
+        if (dd.id === cd.id) break;
+        var dt2 = String(dd.type || 'line');
+        if (isColType(dt2) || kindOf(dt2) === 'shape' || dt2 === 'alertcondition') pos++;
+      }
+      c.col = pos;
+      c.mode = 'truthy';
+      c.kind = 'bool';
+      c.available = true;
+      c.note = '脚本条件，直接读取指标输出的布尔信号列。';
+      return c;
+    }
+    var best = null;
+    var bestScore = 0;
+    for (var k = 0; k < items.length; k++) {
+      var it = items[k];
+      var s = nameScore(title, it.title);
+      if (it.kind === 'shape') s *= 1.15; // 脚本里 alertcondition 与 plotshape 常常同源
+      if (s > bestScore) { bestScore = s; best = it; }
+    }
+    if (best && bestScore >= 50) {
+      if (best.kind === 'shape') {
+        c.linkedTitle = best.title;
+        c.col = best.index;
+        c.mode = 'appear';
+        c.available = true;
+        c.note = '对应图上信号「' + best.title + '」出现，与原生报警同源。';
+        return c;
+      }
+      if (best.kind === 'discrete') {
+        c.linkedTitle = best.title;
+        c.col = best.index;
+        c.mode = 'changed';
+        c.kind = 'signal_discrete';
+        c.available = true;
+        c.note = '对应状态列「' + best.title + '」切换。';
+        return c;
+      }
+      if (isNaAlternating(d, best.index + 1)) {
+        c.linkedTitle = best.title;
+        c.col = best.index;
+        c.mode = 'appear';
+        c.available = true;
+        c.note = '对应图上分段线「' + best.title + '」出现。';
+        return c;
+      }
+    }
+    // 名字对不上：用方向词配 na 交替的上下轨（Bullish Trend Shift ↔ upTrend）
+    var dir = dirOfName(title);
+    if (dir) {
+      for (var m = 0; m < items.length; m++) {
+        var it2 = items[m];
+        if (it2.kind !== 'numeric') continue;
+        if (dirOfTitle(it2.title) !== dir) continue;
+        if (!isNaAlternating(d, it2.index + 1)) continue;
+        c.linkedTitle = it2.title;
+        c.col = it2.index;
+        c.mode = 'appear';
+        c.available = true;
+        c.note = '对应图上「' + it2.title + '」出现（脚本用同一方向量算出来的）。';
+        return c;
+      }
+    }
+    c.note = best
+      ? ('最接近的输出是「' + best.title + '」，还原不出这个条件，客户端不能计算。')
+      : '脚本在服务端定义了这个条件，但图上没有能对应上的输出列，客户端算不出来。';
+    return c;
+  }
+
+  // ---------------------------------------------------------- 脚本条件（源码兜底）
+  //
+  // 免费账号的客户端 metainfo 不一定带 alertcondition 条目（技术报警属于付费能力），
+  // 这时按指标名去公开脚本库找同名脚本、读它的源码，把 alertcondition(...) 的条件名
+  // 原样取出来。名字与原生「创建警报」对话框一致，客户端再按名字映射到图上可读的信号。
+  var PINE_KEY = 'tvx-pine-conds-v1';
+  var PINE_MEM = null;
+  var PINE_BUSY = Object.create(null);
+  var PINE_FAIL = Object.create(null);
+
+  function pineCache() {
+    if (PINE_MEM) return PINE_MEM;
+    try { PINE_MEM = JSON.parse(localStorage.getItem(PINE_KEY) || '{}') || {}; } catch (e) { PINE_MEM = {}; }
+    return PINE_MEM;
+  }
+  function pineSave() {
+    try { localStorage.setItem(PINE_KEY, JSON.stringify(pineCache())); } catch (e) {}
+  }
+  function normName(s) {
+    return String(s || '').toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
+  }
+  /** 像 Pine 脚本名（够长且有空格）；Volume / RSI / MACD 这类内置名不会命中 */
+  function looksLikeScript(name) {
+    var n = String(name || '');
+    return n.length >= 10 && /\s/.test(n);
+  }
+  /** 解析 Pine 源码里的 alertcondition 条件名（去重，保持源码顺序） */
+  function parsePineConds(src) {
+    var out = [];
+    var seen = Object.create(null);
+    // 表达式里本身可能带逗号（ta.crossunder(dir, 0)），用贪婪匹配到行内最后一个 , "标题"
+    var re = /^[ \t]*alertcondition\s*\((.*),\s*["']([^"']+)["']\s*\)/gm;
+    var m;
+    while ((m = re.exec(src))) {
+      var t = String(m[2] || '').trim();
+      if (!t || seen[t]) continue;
+      seen[t] = 1;
+      out.push({ title: t, expr: String(m[1] || '').trim() });
+    }
+    return out;
+  }
+  /** 异步补条件名：搜索同源公开脚本 → 最新版本 → 源码 */
+  function fetchPineConds(name, cb) {
+    var cache = pineCache();
+    if (cache[name]) { cb(cache[name]); return; }
+    if (PINE_BUSY[name]) return;
+    PINE_BUSY[name] = true;
+    var done = function (list) {
+      PINE_BUSY[name] = false;
+      if (!list) PINE_FAIL[name] = true;
+      cb(list || null);
+    };
+    fetch('/pubscripts-suggest-json/?search=' + encodeURIComponent(String(name).replace(/[^\w\s.-]+/g, ' ').trim()))
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var arr = (j && (j.results || j)) || [];
+        var want = normName(name);
+        var hit = null;
+        for (var i = 0; i < arr.length; i++) {
+          // 图表上的指标名可能是脚本标题，也可能是 shorttitle（"AlgoAlpha - 🤖 Adaptive SuperTrend"），
+          // 两个都要比；再允许互相包含，避免后缀/前缀差异导致匹配不上。
+          var cands = [arr[i].scriptName, arr[i].title, arr[i].shortTitle];
+          for (var c2 = 0; c2 < cands.length; c2++) {
+            var n = normName(cands[c2]);
+            if (!n || n.length < 6) continue;
+            if (n === want || n.indexOf(want) >= 0 || want.indexOf(n) >= 0) { hit = arr[i]; break; }
+          }
+          if (hit) break;
+        }
+        if (!hit) return null;
+        var sid = hit.scriptIdPart || hit.id;
+        var enc = encodeURIComponent(sid);
+        return fetch('https://pine-facade.tradingview.com/pine-facade/versions/' + enc + '/last')
+          .then(function (r) { return r.json(); })
+          .then(function (v) {
+            var ver = (v && v[0] && v[0].version) || '1.0';
+            return fetch('https://pine-facade.tradingview.com/pine-facade/get/' + enc + '/' + ver)
+              .then(function (r) { return r.json(); });
+          })
+          .then(function (meta) {
+            var list = parsePineConds(String((meta && meta.source) || ''));
+            if (!list.length) return null;
+            cache[name] = list;
+            pineSave();
+            return list;
+          });
+      })
+      .then(function (list) { done(list); })
+      .catch(function () { done(null); });
+  }
+
+  /**
+   * 指标自己的输出列 + 它自己声明的报警条件。
    *
-   * 关键事实（实测 3.5.0.8375）：`study._metaInfo` 里只有 plots / inputs / styles /
-   * palettes，**没有 alertcondition**。Pine 的 alertcondition 由服务端编译保存、服务端评估，
-   * 客户端既拿不到名字也拿不到布尔序列（搜索结果里只有数量，如
-   * `stats:{alertcondition:6}`）。所以「条件」只能是这里能读到的真实输出列。
-   *
-   * plots 的顺序 == PlotList 的列顺序（time 之后依次对应），实测 Volume：
-   * plots=[vol:line, vol_color:colorer, vol_ma:line]，最后一根
-   * `[time, 50288918, 1, 47993111.2]` ← 三列一一对应，colorer 的值可读但不在
-   * valuesProvider 里（所以只看 valuesProvider 会漏掉颜色列，这正是旧版取错条件的原因）。
+   * 实测结论（3.5.0.8375 + 服务端元数据）：
+   *   - `_metaInfo.plots` 里 type==='alertcondition' 的条目，就是脚本里 alertcondition() 的
+   *     个数与顺序；它们的**名字**在 `_metaInfo.styles[plotId].title`，例如
+   *     "Bullish Trend Shift" / "Bearish Trend Shift" / "High Volatility"。
+   *     这正是原生「创建警报」对话框条件下拉的来源——旧版只按数据列列条件，所以列出一堆
+   *     无关输出，却漏掉脚本真正声明的那几条。
+   *   - alertcondition 不画线、不进 valuesProvider；是否占数据列按实际列数判定：
+   *     cols === 可画类型数 → 不占列（实测如此）；cols === 全部 plots 数 → 占列。
+   *   - 不占列时用同名/近名输出列还原：脚本里 alertcondition 常与 plotshape 用同一表达式
+   *     （如 `ta.crossunder(dir, 0)`），形状列「出现」即等价于该条件成立。
    */
   function studyMeta(a) {
     var out = [];
@@ -208,7 +501,11 @@
       var id = list[i] && list[i].id;
       var name = String((list[i] && list[i].name) || '');
       if (!id || !name) continue;
-      var row = { id: String(id), name: name, inputs: [], plots: [], ok: false, note: '', serverConds: 0 };
+      var row = {
+        id: String(id), name: name, inputs: [], plots: [], conds: [],
+        ok: false, note: '', serverConds: 0, condCols: false,
+        needPine: false, condFromSource: false
+      };
       try {
         var api = a.getStudyById(id);
         if (api && typeof api.getInputValues === 'function') {
@@ -237,57 +534,87 @@
                 }
               }
             } catch (e) {}
+
             var cols = v.length - 1;
-            // 只有会产出数值/状态列的 plot 类型才对得上数据列。
-            // alertcondition / plotshape / plotchar 这类只在图上画东西或在服务端评估，
-            // 不占数据列——必须先把它们挑出去，否则列会整体错位。
-            var COL_TYPES = {
-              line: 1, histogram: 1, area: 1, columns: 1, stepline: 1,
-              colorer: 1, text_colorer: 1, data: 1, linebr: 1
-            };
             var colDefs = [];
-            var otherDefs = [];
+            var condDefs = [];
+            // 可能占数据列的类型：数值/状态列 + 图形列（plotshape 要画在某个价位上，
+            // 客户端必须收到坐标，所以它同样有数据列）
+            var dataDefs = [];
             for (var di = 0; di < defs.length; di++) {
               var dt = String((defs[di] && defs[di].type) || 'line');
-              if (COL_TYPES[dt]) colDefs.push(defs[di]);
-              else otherDefs.push(defs[di]);
+              if (dt === 'alertcondition') { condDefs.push(defs[di]); continue; }
+              if (isColType(dt)) colDefs.push(defs[di]);
+              if (isColType(dt) || kindOf(dt) === 'shape') dataDefs.push(defs[di]);
             }
-            var serverConds = 0;
-            for (var oi = 0; oi < otherDefs.length; oi++) {
-              if (String((otherDefs[oi] || {}).type) === 'alertcondition') serverConds++;
+            row.serverConds = condDefs.length;
+
+            // 列映射：按「谁的数量对得上实际列数」来判定，不靠猜
+            var cands = [{ defs: dataDefs, condCols: false }];
+            if (condDefs.length) cands.push({ defs: defs, condCols: true });
+            if (colDefs.length && colDefs.length !== dataDefs.length) {
+              cands.push({ defs: colDefs, condCols: false });
             }
-            row.serverConds = serverConds;
-            var defByCol = colDefs.length === cols ? colDefs : null;
-            if (!defByCol) {
-              defByCol = [];
-              for (var q = 0; q < cols; q++) defByCol.push({ id: '', type: 'line' });
-              row.note = '输出定义 ' + defs.length + ' 条 / 数据列 ' + cols + ' 列，按列名兜底';
-            }
-            for (var k = 0; k < cols; k++) {
-              var def = defByCol[k] || { id: '', type: 'line' };
-              var kind = kindOf(def.type);
-              var item = {
-                index: k,
-                id: String(def.id || ('col' + k)),
-                title: plotTitleOf(def, k, titles, styles),
-                type: String(def.type || 'line'),
-                kind: kind,
-                value: v[k + 1]
-              };
-              if (kind === 'discrete') {
-                var hist = columnHistory(d, k + 1, 400);
-                var seen = Object.create(null);
-                var choices = [];
-                for (var h = 0; h < hist.length; h++) {
-                  var key = String(hist[h]);
-                  if (!seen[key]) { seen[key] = 0; choices.push(hist[h]); }
-                  seen[key]++;
-                }
-                item.choices = choices.slice(0, 12);
-                item.counts = seen;
-                item.color = paletteOf(mi, def);
+            var mapDefs = null;
+            row.condCols = false;
+            for (var ci2 = 0; ci2 < cands.length; ci2++) {
+              if (cands[ci2].defs.length === cols) {
+                mapDefs = cands[ci2].defs;
+                row.condCols = cands[ci2].condCols;
+                break;
               }
-              row.plots.push(item);
+            }
+            var items = [];
+            if (mapDefs) {
+              for (var k = 0; k < cols; k++) items.push(makeItem(mapDefs[k], k, v, d, mi, styles, titles));
+            } else {
+              // 对不上就按「数值/状态/图形」的顺序兜底，并把差异写进 note
+              mapDefs = dataDefs;
+              row.note = '输出定义 ' + defs.length + ' 条（数据列 ' + dataDefs.length +
+                ' 条）/ 实际数据列 ' + cols + ' 列，按输出顺序兜底';
+              for (var q = 0; q < cols; q++) {
+                items.push(makeItem(mapDefs[q] || { id: '', type: 'line' }, q, v, d, mi, styles, titles));
+              }
+            }
+            row.plots = items;
+
+            var srcConds = pineCache()[name];
+            if (condDefs.length) {
+              // 元数据里就有 alertcondition：优先用它的名字与顺序（与客户端原生对话框同源）。
+              // 个别编译产物会把标题留成 plot_19 这种占位名，这时按同序号用脚本源码的名字补。
+              for (var ci = 0; ci < condDefs.length; ci++) {
+                var cd = condDefs[ci];
+                var cTitle = (styles[cd.id] && styles[cd.id].title) || '';
+                if (!cTitle || /^plot_\d+$/i.test(String(cTitle))) {
+                  cTitle = (srcConds && srcConds[ci] && srcConds[ci].title) || ('条件 ' + (ci + 1));
+                  if (srcConds && srcConds[ci]) row.condFromSource = true;
+                }
+                row.conds.push(buildCond(cd, cTitle, ci, items, row.condCols, defs, d));
+              }
+            } else if (srcConds && srcConds.length) {
+              // 元数据里没有 alertcondition（免费账号常见）：改用脚本源码里的条件名，
+              // 名字、条数、顺序与原生对话框一致
+              row.condFromSource = true;
+              for (var si = 0; si < srcConds.length; si++) {
+                row.conds.push(buildCond(
+                  { id: 'src_' + si, type: 'alertcondition' },
+                  srcConds[si].title, si, items, false, defs, d
+                ));
+              }
+            } else {
+              // 内置指标（RSI / Volume / MACD…）没有 alertcondition 元数据，只能按输出列给条件
+              for (var ii = 0; ii < items.length; ii++) {
+                var it = items[ii];
+                if (it.kind === 'shape') continue;
+                row.conds.push({
+                  id: it.id, index: ii, title: it.title, source: 'plot', kind: it.kind,
+                  col: it.index, mode: it.kind === 'discrete' ? 'changed' : 'numeric',
+                  available: true, note: '', choices: it.choices, counts: it.counts,
+                  color: it.color, value: it.value, type: it.type
+                });
+              }
+              // 像脚本名就先别把「输出列」当条件：去读脚本源码，拿到真正的条件名再列
+              if (looksLikeScript(name) && !PINE_FAIL[name]) row.needPine = true;
             }
           }
         }
@@ -345,8 +672,15 @@
     for (var j = 0; j < same.length; j++) if (sameInputs(same[j].inputs, al.studyInputs)) withInputs.push(same[j]);
     var s = withInputs[0] || same[0];
     if (!s.ok) return { ok: false, reason: '指标暂无数据' };
+    if (al.condId) {
+      var cond = null;
+      for (var c = 0; c < s.conds.length; c++) if (s.conds[c].id === al.condId) { cond = s.conds[c]; break; }
+      if (!cond) return { ok: false, reason: '条件已不存在（脚本改版？）' };
+      if (!cond.available) return { ok: false, reason: '该条件客户端读不到信号' };
+      return { ok: true, study: s, cond: cond };
+    }
     if (al.plotIndex >= s.plots.length) return { ok: false, reason: '曲线不存在' };
-    return { ok: true, study: s };
+    return { ok: true, study: s, cond: null };
   }
 
   // ---------------------------------------------------------------- 条件求值
@@ -387,6 +721,31 @@
     if (String(cur) !== String(target)) return false;
     if (prev === null || prev === undefined || prev === '') return false;
     return String(prev) !== String(cur);
+  }
+
+  /** 布尔类信号：非空/非零即为真 */
+  function signalOn(v) {
+    if (v === null || v === undefined || v === '') return false;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'number') return isFinite(v) && v !== 0;
+    return true;
+  }
+
+  /**
+   * 脚本条件（alertcondition）的求值：
+   *   appear  —— 输出列从「空」变「有值」（plotshape / 分段线的信号出现）
+   *   changed —— 状态列切换
+   *   truthy  —— 指标真的输出了布尔信号列，取上升沿
+   */
+  function evalSignal(mode, prev, cur) {
+    if (mode === 'appear') return isNum(cur) && !isNum(prev);
+    if (mode === 'changed') {
+      if (cur === null || cur === undefined || cur === '') return false;
+      if (prev === null || prev === undefined || prev === '') return false;
+      return String(prev) !== String(cur);
+    }
+    if (mode === 'truthy') return signalOn(cur) && !signalOn(prev);
+    return false;
   }
 
   // ---------------------------------------------------------------- 配置读写
@@ -438,6 +797,7 @@
   }
 
   function rangeText(al) {
+    if (al.condSource === 'alertcondition') return '';
     if (al.plotKind === 'discrete') return String(al.value);
     if (!condNeedsValue(al.condition)) return '';
     return al.condition === 'in_range' || al.condition === 'out_range'
@@ -446,6 +806,9 @@
   }
 
   function describe(al) {
+    if (al.condSource === 'alertcondition') {
+      return (al.condTitle || '脚本条件') + '（脚本定义的条件）';
+    }
     var head = (al.plotTitle || '指标') + ' ' + condLabel(al.condition);
     var tail = rangeText(al);
     return tail ? head + ' ' + tail : head;
@@ -462,8 +825,8 @@
       exchange: parts.length > 1 ? parts[0] : '',
       interval: String((ctx && ctx.resolution) || al.resolution || ''),
       study: al.studyName || '',
-      plot: plotTitle || al.plotTitle || '',
-      condition: condLabel(al.condition),
+      plot: plotTitle || al.condTitle || al.plotTitle || '',
+      condition: al.condSource === 'alertcondition' ? '出现' : condLabel(al.condition),
       threshold: rangeText(al),
       value: fmtNum(cur),
       time: bar ? new Date(bar.time * 1000).toLocaleString() : '',
@@ -548,17 +911,19 @@
       if (!r.ok) { rt.status = r.reason; continue; }
       var ser = readSeries(ctx.a, r.study.id);
       if (!ser) { rt.status = '指标暂无数据'; continue; }
-      var cur = ser.cur[al.plotIndex + 1];
-      var prev = ser.prev ? ser.prev[al.plotIndex + 1] : null;
+      var col = r.cond ? r.cond.col : al.plotIndex;
+      var cur = ser.cur[col + 1];
+      var prev = ser.prev ? ser.prev[col + 1] : null;
       rt.value = cur;
       if (rt.bar !== ser.time) {
         rt.bar = ser.time;
         rt.firedForBar = al.lastBarTime === ser.time;
       }
       if (rt.firedForBar) { rt.status = '就绪（本根已触发）'; continue; }
-      var hit = al.plotKind === 'discrete'
-        ? evalChangedTo(prev, cur, al.value)
-        : evalCond(al.condition, prev, cur, Number(al.value), Number(al.value2));
+      var hit;
+      if (r.cond) hit = evalSignal(r.cond.mode, prev, cur);
+      else if (al.plotKind === 'discrete') hit = evalChangedTo(prev, cur, al.value);
+      else hit = evalCond(al.condition, prev, cur, Number(al.value), Number(al.value2));
       if (!hit) {
         rt.status = '就绪';
         continue;
@@ -569,8 +934,8 @@
         continue;
       }
       rt.firedForBar = true;
-      var plot = r.study.plots[al.plotIndex];
-      fire(al, ctx, cur, ser.time, plot ? plot.title : al.plotTitle);
+      var plot = r.cond ? r.cond.title : (r.study.plots[al.plotIndex] ? r.study.plots[al.plotIndex].title : al.plotTitle);
+      fire(al, ctx, cur, ser.time, plot);
       if (al.once) { al.enabled = false; dirty = true; }
     }
     if (dirty) saveConfig();
@@ -703,7 +1068,7 @@
 
   var FORM = {
     studyId: '',
-    plotIndex: 0,
+    condIndex: 0,
     condition: 'cross_up',
     value: '',
     value2: '',
@@ -1051,43 +1416,62 @@
     }
     if (!FORM.studyId || !meta.some(function (s) { return s.id === FORM.studyId; })) {
       FORM.studyId = meta[0].id;
-      FORM.plotIndex = 0;
+      FORM.condIndex = 0;
     }
+    // 脚本指标若元数据里没有 alertcondition，按指标名去公开脚本库读源码补条件名，
+    // 读完自渲染一次；失败则退回按输出列给条件，不会反复请求。
+    var needList = meta.filter(function (s) { return s.needPine && !pineCache()[s.name]; });
+    for (var ni = 0; ni < needList.length; ni++) {
+      (function (s) {
+        fetchPineConds(s.name, function (list) {
+          if (list && UI && FORM.studyId === s.id) renderForm();
+        });
+      })(needList[ni]);
+    }
+
     var current = meta.filter(function (s) { return s.id === FORM.studyId; })[0] || meta[0];
-    if (FORM.plotIndex >= current.plots.length) FORM.plotIndex = 0;
+    var conds = current.conds || [];
+    if (!conds.length) {
+      body.appendChild(el('div', 'tvxa-empty', current.needPine && !PINE_FAIL[current.name]
+        ? ('正在按脚本源码读取「' + current.name + '」声明的报警条件…')
+        : ('「' + current.name + '」没有可用的条件输出。换一个指标，或给它加一条 alertcondition。')));
+      return;
+    }
+    if (FORM.condIndex >= conds.length) FORM.condIndex = 0;
+    var curCond = conds[FORM.condIndex] || conds[0];
 
-    // ---- 条件：指标 → 该指标自己的输出列 → 按输出类型给条件
-    // 这里只列「客户端真能读到的输出列」。Pine 的 alertcondition 名字由服务端保存、
-    // 由服务端评估，客户端既没有名字也没有布尔序列（搜索接口只给数量，
-    // 如 stats:{alertcondition:6}），所以不可能把 alertcondition 列进来。
-    var curPlot = current.plots[FORM.plotIndex] || current.plots[0];
-
+    // ---- 条件：指标 → 该指标自己声明的条件
+    // 脚本指标（Pine）的 alertcondition 名字在 metainfo.styles[plotId].title 里，
+    // 与原生「创建警报」对话框的条件列表完全一致（如 "Bullish Trend Shift"）。
     var studySel = selectEl(meta.map(function (s) {
-      return { value: s.id, label: s.name + (s.inputs.length ? '（' + inputsText(s.inputs) + '）' : '') };
+      // 名字只显示指标名（和原生一致），参数放到下面的小字里，避免长参数把名字挤没
+      return { value: s.id, label: s.name };
     }), FORM.studyId);
     studySel.addEventListener('change', function () {
       FORM.studyId = studySel.value;
-      FORM.plotIndex = 0;
+      FORM.condIndex = 0;
       FORM.value = '';
       FORM.dvalue = '';
       renderForm();
     });
 
-    var plotSel = selectEl(current.plots.map(function (p) {
-      var tag = p.kind === 'discrete' ? '｜状态列' : (p.kind === 'shape' ? '｜图形·不可读' : '');
-      var now = p.kind === 'discrete' ? String(p.value) : fmtNum(p.value);
-      return { value: p.index, label: p.title + tag + '　当前 ' + now };
-    }), FORM.plotIndex);
-    plotSel.addEventListener('change', function () {
-      FORM.plotIndex = Number(plotSel.value);
+    var condSel = selectEl(conds.map(function (c, i) {
+      var tag;
+      if (c.source === 'alertcondition') tag = c.available ? '｜脚本条件' : '｜客户端不可读';
+      else if (c.kind === 'discrete') tag = '｜状态列';
+      else tag = '｜数值列';
+      return { value: i, label: c.title + tag };
+    }), FORM.condIndex);
+    condSel.addEventListener('change', function () {
+      FORM.condIndex = Number(condSel.value);
       FORM.value = '';
       FORM.dvalue = '';
-      renderForm(); // 输出类型变了，下面控件必须跟着换
+      renderForm(); // 条件类型变了，下面控件必须跟着换
     });
 
     var condGrid = el('div', 'tvxa-two');
-    condGrid.appendChild(field('指标', studySel));
-    condGrid.appendChild(field('条件', plotSel));
+    condGrid.appendChild(field('指标', studySel, inputsText(current.inputs) ? '参数：' + inputsText(current.inputs) : ''));
+    condGrid.appendChild(field('条件', condSel));
 
     var opGrid = el('div', 'tvxa-three');
     var numCondSel = null;
@@ -1097,21 +1481,30 @@
     var v2Wrap = null;
     var isRange = false;
     var condHint = '';
+    var blocked = false;
 
-    if (!curPlot || curPlot.kind === 'shape') {
+    if (curCond.source === 'alertcondition') {
       opGrid.style.display = 'none';
-      condHint = '这个输出是图上画的图形信号，没有可读的数值列，不能作为条件。换一个输出。';
-    } else if (curPlot.kind === 'discrete') {
-      var choices = (curPlot.choices || []).slice();
-      var curStr = String(curPlot.value);
+      if (!curCond.available) {
+        blocked = true;
+        condHint = curCond.note || '这个条件由脚本在服务端定义，客户端读不到信号，暂时做不了本地报警。';
+      } else {
+        condHint = curCond.note ||
+          ('脚本自己定义的报警条件：信号出现即触发，与原生「' + curCond.title + '」报警一致。');
+        if (current.condFromSource) condHint += ' 条件名取自脚本源码，与原生对话框一致。';
+      }
+    } else if (curCond.kind === 'discrete') {
+      var choices = (curCond.choices || []).slice();
+      var curStr = String(curCond.value);
       var has = function (c) { return String(c) === curStr; };
-      if (!choices.some(has)) choices.push(curPlot.value);
+      if (!choices.length) choices.push(curCond.value);
+      if (!choices.some(has)) choices.push(curCond.value);
       var want = FORM.dvalue ? String(FORM.dvalue) : curStr;
       if (!choices.some(function (c) { return String(c) === want; })) choices.push(want);
       FORM.dvalue = want;
       discreteSel = selectEl(choices.map(function (c) {
-        var hex = typeof curPlot.color === 'function' ? curPlot.color(c) : null;
-        var cnt = curPlot.counts ? curPlot.counts[String(c)] : 0;
+        var hex = typeof curCond.color === 'function' ? curCond.color(c) : null;
+        var cnt = curCond.counts ? curCond.counts[String(c)] : 0;
         return {
           value: String(c),
           label: '值 ' + c + (hex ? '（' + hex + '）' : '') + (cnt ? ' · 近 400 根出现 ' + cnt + ' 次' : '')
@@ -1124,7 +1517,7 @@
       numCondSel = selectEl(CONDS.map(function (c) { return { value: c.id, label: c.label }; }), FORM.condition);
       valueInput = inputEl(FORM.value, 'number', 'any');
       if (FORM.value === undefined || FORM.value === '' || !isFinite(Number(FORM.value))) {
-        valueInput.value = fmtNum(curPlot.value);
+        valueInput.value = fmtNum(curCond.value);
       }
       value2Input = inputEl(FORM.value2, 'number', 'any');
       opGrid.appendChild(field('比较方式', numCondSel));
@@ -1144,12 +1537,11 @@
         FORM.condition = numCondSel.value;
         syncOps();
       });
-      condHint = '数值列需要比较方式与阈值；阈值默认填当前值，改成你要的水平。';
+      condHint = '这个指标没有声明条件名，只能按数值列比较；阈值默认填当前值，改成你要的水平。';
     }
 
-    if (current.serverConds > 0) {
-      condHint += ' 该脚本另声明了 ' + current.serverConds +
-        ' 个服务端报警条件（alertcondition）：名字和触发值都在服务端，客户端读不到，所以这里列不出来。';
+    if (current.serverConds > 0 && curCond.source !== 'alertcondition') {
+      condHint += ' 该脚本还声明了 ' + current.serverConds + ' 个条件。';
     }
     var condSection = section('条件', [condGrid, opGrid], condHint);
 
@@ -1232,18 +1624,21 @@
 
     var actions = el('div', 'tvxa-actions');
     actions.appendChild(btn('创建报警', 'primary', function () {
-      var kind = curPlot ? curPlot.kind : 'numeric';
       FORM.msgTitle = titleInput.value;
       FORM.msgBody = bodyInput.value;
       FORM.notifySystem = !!sysChk.checked;
       FORM.notifyEmail = !!mailChk.checked;
       FORM.emailFrom = fromInput.value.trim();
       FORM.emailTo = toInput.value.trim();
-      if (!curPlot || kind === 'shape') {
-        showBanner('这个输出不能作为条件，换一个输出', true);
-        return;
-      }
-      if (kind === 'discrete') {
+      if (curCond.source === 'alertcondition') {
+        if (!curCond.available) {
+          showBanner('这个条件客户端读不到信号，换一个条件', true);
+          return;
+        }
+        FORM.condition = 'appear';
+        FORM.value = 0;
+        FORM.value2 = 0;
+      } else if (curCond.kind === 'discrete') {
         FORM.condition = COND_CHANGED;
         FORM.value = String(discreteSel.value);
         FORM.value2 = '';
@@ -1263,7 +1658,6 @@
           return;
         }
       }
-      var plot = curPlot;
       var notify = [];
       if (FORM.notifySystem) notify.push('system');
       if (FORM.notifyEmail) notify.push('email');
@@ -1274,10 +1668,14 @@
         resolution: ctx.resolution,
         studyName: current.name,
         studyInputs: current.inputs,
-        plotIndex: plot.index,
-        plotTitle: plot.title,
-        plotKind: kind,
-        plotType: plot.type,
+        condId: curCond.source === 'alertcondition' ? curCond.id : '',
+        condTitle: curCond.title,
+        condSource: curCond.source,
+        condMode: curCond.mode || '',
+        plotIndex: curCond.col,
+        plotTitle: curCond.title,
+        plotKind: curCond.source === 'alertcondition' ? 'signal' : curCond.kind,
+        plotType: curCond.type || '',
         condition: FORM.condition,
         value: FORM.value,
         value2: FORM.value2,
@@ -1391,6 +1789,44 @@
 
   // ---------------------------------------------------------------- 启动
 
+  // ---------------------------------------------------------------- 自检转储
+
+  /**
+   * 把每个指标读到的「条件名 / 列映射 / 是否可读」写到 userData/tvx-alerts-study-dump.json。
+   * 用来核对脚本声明的 alertcondition（如 "Bullish Trend Shift"）是否被正确取到。
+   */
+  function dumpStudies() {
+    var c = chartCtx();
+    if (!c) return false;
+    var meta = studyMeta(c.a);
+    var data = [];
+    for (var i = 0; i < meta.length; i++) {
+      var s = meta[i];
+      var plots = [];
+      for (var p = 0; p < s.plots.length; p++) {
+        var it = s.plots[p];
+        plots.push(it.id + ':' + it.type + ':' + it.title);
+      }
+      var items = [];
+      for (var q = 0; q < s.conds.length; q++) {
+        var x = s.conds[q];
+        items.push({
+          title: x.title, source: x.source, mode: x.mode, col: x.col,
+          available: !!x.available, note: x.note || '', linked: x.linkedTitle || ''
+        });
+      }
+      data.push({
+        name: s.name, ok: s.ok, note: s.note, serverConds: s.serverConds,
+        condCols: s.condCols, cols: s.plots.length, plots: plots, conds: items
+      });
+    }
+    var payload = { symbol: c.symbol, resolution: c.resolution, at: Date.now(), studies: data };
+    try {
+      if (BR.dump) BR.dump(payload);
+    } catch (e) {}
+    return payload;
+  }
+
   function start() {
     buildUI();
     loadConfig(true).then(function () {
@@ -1407,14 +1843,29 @@
       setInterval(tick, TICK_MS);
       setInterval(ensureToolbarButton, 2000);
       setTimeout(tick, 800);
+      setTimeout(dumpStudies, 7000);
       window.addEventListener('focus', function () { loadConfig(false).then(pulse); });
     });
     // 调试/自检入口
-    window.__tvxAlertsDebug = {
+      var studies = function () { var c = chartCtx(); return c ? studyMeta(c.a) : []; };
+      window.__tvxAlertsDebug = {
       tick: tick,
       ctx: chartCtx,
       bar: function () { return mainBar(chartCtx()); },
-      studies: function () { var c = chartCtx(); return c ? studyMeta(c.a) : []; },
+      studies: studies,
+      dump: dumpStudies,
+      pine: function (name) { return pineCache()[name] || null; },
+      fetchPine: function (name) { return new Promise(function (r) { fetchPineConds(name, r); }); },
+      conds: function () {
+        var m = studies();
+        var out = [];
+        for (var i = 0; i < m.length; i++) {
+          for (var j = 0; j < m[i].conds.length; j++) {
+            out.push(m[i].name + ' · ' + m[i].conds[j].title + ' · ' + m[i].conds[j].mode + ' · col=' + m[i].conds[j].col);
+          }
+        }
+        return out;
+      },
       config: function () { return CFG; },
       render: function (tpl, al) {
         var c = chartCtx();

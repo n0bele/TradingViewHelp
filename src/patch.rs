@@ -552,7 +552,21 @@ const PRELOAD_BRIDGE_MARK: &str = "/*tvx-alerts-bridge*/";
 
 /// 追加到 platform-preload.js 末尾的桥：把主进程的报警 IPC 暴露给图表页。
 /// preload 里 `process.contextIsolated` 为真（实测），所以必须走 contextBridge。
-const PRELOAD_BRIDGE: &str = "\n;(function(){/*tvx-alerts-bridge*/try{var e=require(\"electron\");if(!e||!e.contextBridge||!e.ipcRenderer)return;e.contextBridge.exposeInMainWorld(\"__TVX_ALERTS__\",{get:function(){return e.ipcRenderer.invoke(\"tvx-alerts:get\")},save:function(c){return e.ipcRenderer.invoke(\"tvx-alerts:save\",c)},state:function(s){return e.ipcRenderer.invoke(\"tvx-alerts:state\",s)},fire:function(p){return e.ipcRenderer.invoke(\"tvx-alerts:fire\",p)},test:function(k){return e.ipcRenderer.invoke(\"tvx-alerts:test\",k)}})}catch(err){console.error(\"[tvx-alerts-bridge]\",err)}})();\n";
+const PRELOAD_BRIDGE: &str = "\n;(function(){/*tvx-alerts-bridge*/try{var e=require(\"electron\");if(!e||!e.contextBridge||!e.ipcRenderer)return;e.contextBridge.exposeInMainWorld(\"__TVX_ALERTS__\",{get:function(){return e.ipcRenderer.invoke(\"tvx-alerts:get\")},save:function(c){return e.ipcRenderer.invoke(\"tvx-alerts:save\",c)},state:function(s){return e.ipcRenderer.invoke(\"tvx-alerts:state\",s)},fire:function(p){return e.ipcRenderer.invoke(\"tvx-alerts:fire\",p)},test:function(k){return e.ipcRenderer.invoke(\"tvx-alerts:test\",k)},dump:function(d){return e.ipcRenderer.invoke(\"tvx-alerts:dump\",d)}})}catch(err){console.error(\"[tvx-alerts-bridge]\",err)}})();\n";
+
+/// 去掉 preload 里的桥（整行），并把因此留下的多余空行收掉，保证撤回后与原文一致。
+fn strip_bridge(src: &str) -> String {
+    let mut out = String::new();
+    for line in src.split_inclusive('\n') {
+        if !line.contains(PRELOAD_BRIDGE_MARK) {
+            out.push_str(line);
+        }
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    out
+}
 
 /// 把报警功能所需的文件落到托管副本里（开关打开时写入，关闭时清掉）。
 ///
@@ -575,9 +589,16 @@ pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<()> {
         if preload.is_file() {
             let src = fs::read_to_string(&preload)
                 .with_context(|| format!("读取 {}", preload.display()))?;
-            if !src.contains(PRELOAD_BRIDGE_MARK) {
-                let mut out = src;
-                out.push_str(PRELOAD_BRIDGE);
+            // 桥可能来自旧版本（比如还没暴露 dump 通道）。按标记整行换掉，再追加当前桥，
+            // 这样升级时不会把旧桥留在页面里。
+            let out = if !src.contains(PRELOAD_BRIDGE_MARK) || !src.contains("tvx-alerts:dump") {
+                let mut cleaned = strip_bridge(&src);
+                cleaned.push_str(PRELOAD_BRIDGE);
+                Some(cleaned)
+            } else {
+                None
+            };
+            if let Some(out) = out {
                 fs::write(&preload, out)
                     .with_context(|| format!("写入 {}", preload.display()))?;
             }
@@ -590,8 +611,9 @@ pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<()> {
     if preload.is_file() {
         let src = fs::read_to_string(&preload)
             .with_context(|| format!("读取 {}", preload.display()))?;
-        if src.contains(PRELOAD_BRIDGE) {
-            fs::write(&preload, src.replacen(PRELOAD_BRIDGE, "", 1))
+        if src.contains(PRELOAD_BRIDGE_MARK) {
+            let out = strip_bridge(&src);
+            fs::write(&preload, out)
                 .with_context(|| format!("写入 {}", preload.display()))?;
         }
     }
@@ -1047,15 +1069,29 @@ mod tests {
         for s in ["条件", "周期和触发", "消息", "通知"] {
             assert!(ALERTS_ENGINE_JS.contains(s), "设置页缺少分组：{s}");
         }
-        // 条件必须来自指标真实的输出列（metainfo.plots），而不是界面上看得到的名字。
-        // 实测：metainfo 里只有 plots/inputs/styles，没有 alertcondition；colorer 占数据列
-        // 但不在 valuesProvider 里，na 交替列要靠「出现/消失」表达。
+        // 条件必须与原生对话框一致：脚本 alertcondition 的名字在 metainfo.styles[plotId].title
+        // （如 "Bullish Trend Shift"），数量与顺序来自 metainfo.plots 里 type=alertcondition 的条目。
+        // 实测：alertcondition 不占数据列，靠同名/同方向输出列还原信号；colorer 占数据列但
+        // 不在 valuesProvider 里；na 交替列用「出现/消失」表达。
         assert!(ALERTS_ENGINE_JS.contains("_metaInfo"), "条件要读指标的元数据");
         assert!(ALERTS_ENGINE_JS.contains("COL_TYPES"), "要按 plot 类型把不占数据列的条目分开");
-        assert!(ALERTS_ENGINE_JS.contains("alertcondition"), "要识别服务端 alertcondition 并说明读不到");
+        assert!(ALERTS_ENGINE_JS.contains("alertcondition"), "要识别脚本声明的 alertcondition");
+        assert!(ALERTS_ENGINE_JS.contains("buildCond"), "alertcondition 要落到可读信号上");
+        assert!(ALERTS_ENGINE_JS.contains("styles[cd.id]"), "条件名取自 styles[plotId].title");
+        assert!(ALERTS_ENGINE_JS.contains("nameScore"), "条件与输出列要能按名字对账");
+        assert!(ALERTS_ENGINE_JS.contains("isNaAlternating"), "上下轨这类 na 交替列要能当信号");
         assert!(ALERTS_ENGINE_JS.contains("evalChangedTo"), "colorer 状态列按「变为」求值");
         assert!(ALERTS_ENGINE_JS.contains("disappear"), "na 交替列要能用出现/消失表达");
         assert!(ALERTS_ENGINE_JS.contains("serverConds"), "要告诉用户脚本还有几个服务端条件");
+        // 免费账号的客户端 metainfo 常常不带 alertcondition（技术报警是付费能力）。
+        // 这时按指标名去公开脚本库找同名脚本、读源码，把 alertcondition 的名字原样取出来，
+        // 保证条件下拉仍是脚本真正声明的那几条，而不是一堆无关输出列。
+        assert!(ALERTS_ENGINE_JS.contains("parsePineConds"), "要能从脚本源码解析条件名");
+        assert!(ALERTS_ENGINE_JS.contains("pubscripts-suggest-json"), "要能按指标名匹配公开脚本");
+        assert!(ALERTS_ENGINE_JS.contains("pine-facade"), "要能取到脚本源码");
+        assert!(ALERTS_ENGINE_JS.contains("needPine"), "元数据缺 alertcondition 时要走源码兜底");
+        assert!(ALERTS_ENGINE_JS.contains("tvx-pine-conds"), "条件名要缓存，别每次开面板都请求");
+        assert!(ALERTS_MAIN_JS.contains("tvx-alerts:dump"), "自检转储通道");
         // 周期/触发不单独设置，只标注与图表一致
         assert!(ALERTS_ENGINE_JS.contains("与图表一致"));
         assert!(!ALERTS_ENGINE_JS.contains("冷却（分钟"), "触发频次不再暴露给用户");
