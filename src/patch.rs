@@ -1090,6 +1090,14 @@ mod tests {
         assert!(ALERTS_ENGINE_JS.contains("pubscripts-suggest-json"), "要能按指标名匹配公开脚本");
         assert!(ALERTS_ENGINE_JS.contains("pine-facade"), "要能取到脚本源码");
         assert!(ALERTS_ENGINE_JS.contains("needPine"), "元数据缺 alertcondition 时要走源码兜底");
+        // 关键：图表上的指标名可能被别人改过（如 "…SuperTrend [MergeAlerts]" 不是 AlgoAlpha 那个
+        // 公开脚本），按名字搜索会拉错脚本、列出别人的条件名。必须优先用元数据里的脚本 id
+        // 直接读「这个脚本自己」的源码，并在名字带 [作者] 时校验作者。
+        assert!(ALERTS_ENGINE_JS.contains("fetchSourceConds"), "要能按脚本 id 读它自己的源码");
+        assert!(ALERTS_ENGINE_JS.contains("scriptId"), "要从元数据里取脚本 id");
+        assert!(ALERTS_ENGINE_JS.contains("authorOf"), "指标名带 [作者] 时要校验脚本作者");
+        assert!(ALERTS_ENGINE_JS.contains("plotConds"), "读不到条件名时要用输出列兜底，不能空");
+        assert!(ALERTS_ENGINE_JS.contains("输出列·过渡"), "读取期间要标明当前是过渡列表");
         assert!(ALERTS_ENGINE_JS.contains("tvx-pine-conds"), "条件名要缓存，别每次开面板都请求");
         assert!(ALERTS_MAIN_JS.contains("tvx-alerts:dump"), "自检转储通道");
         // 周期/触发不单独设置，只标注与图表一致

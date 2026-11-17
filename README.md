@@ -25,7 +25,10 @@
 - 设置页按 TradingView 原生报警的四段组织：
   - **条件**：先选指标，再选**这个指标自己声明的条件名**，与原生「创建警报」对话框的列表一致：
     - 脚本指标（Pine）的条件来自 `metaInfo.plots` 里 `type=alertcondition` 的条目，名字取 `metaInfo.styles[plotId].title`，例如 `Machine Learning Adaptive SuperTrend` 的 `Bullish Trend Shift` / `Bearish Trend Shift` / `High Volatility` / `Medium Volatility` / `Low Volatility`。
-    - 免费账号的客户端 `metaInfo` 往往**不带** `alertcondition`（技术报警属于服务端付费能力）。这时按指标名在公开脚本库里找到同名脚本、读它的源码，把 `alertcondition(...)` 的条件名原样取出来（结果缓存在本地，不用每次开面板都请求）。条件名与原生对话框一致，等于绕开了元数据缺失。
+    - 免费账号的客户端 `metaInfo` 往往**不带** `alertcondition`（技术报警属于服务端付费能力）。这时改读脚本源码，把 `alertcondition(...)` 的条件名原样取出来（缓存在本地，不用每次开面板都请求）。
+    - 读源码**先按元数据里的脚本 id**（`PUB;…` / `USER;…`）直接取「这个脚本自己」的源码，跨域带页面会话，所以仅公开、需授权、受邀脚本都以它自己为准；只有当元数据里没有脚本 id 时，才退回按名字在公开脚本库搜索。
+    - 图表上的指标名常被别人改过（例如 `Machine Learning Adaptive SuperTrend [MergeAlerts]` 就不是 AlgoAlpha 那个公开脚本）。所以名字里带 `[作者]` 时，作者对不上的搜索结果一律**不采用**，避免把别人的条件名（如 `Bullish Trend Shift`）冒充成你的脚本条件。
+    - 两种来源都拿不到时**不会留空**：列出该指标在图上的输出列与图形信号（图形信号按「出现」触发），并在条件段说明原因，你仍然可以先建报警。
     - 每个条件会自动落到客户端能读到的同源信号上：同名（或同名去 Shift/Signal 后缀）的图形列 → 「信号出现」；状态列 → 「状态切换」；`na` 交替的上下轨 → 「出现」；名字对不上时按方向词（Bullish/Bearish ↔ up/down）配对上下轨。设置页会写明每个条件对应的是哪条输出。
     - 确实还原不出的条件（如这段脚本的波动率聚类切换，脚本内部算了但没画成可读列）会灰显并标注「客户端不可读」，不会假装能报警。
     - 内置指标（RSI、Volume、MACD…）没有 `alertcondition` 元数据，退回按输出列给条件：数值列 → 上穿 / 下穿 / 大于 / 小于 / 区间 / 出现 / 消失 + 阈值；状态列（colorer）→ 只选「变成哪个值」。
