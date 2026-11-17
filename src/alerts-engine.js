@@ -1328,6 +1328,7 @@
       '.tvxa-input:focus{border-color:#2962ff}',
       'textarea.tvxa-input{resize:vertical;min-height:52px;font-family:inherit}',
       '.tvxa-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
+      '.tvxa-stack{display:flex;flex-direction:column;gap:10px}',
       '.tvxa-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}',
       '.tvxa-check{display:flex;align-items:center;gap:6px;margin:6px 0;font-size:12px;color:#c9ccd3}',
       '.tvxa-check input{accent-color:#2962ff}',
@@ -1610,7 +1611,11 @@
       renderForm(); // 条件类型变了，下面控件必须跟着换
     });
 
-    var condGrid = el('div', 'tvxa-two');
+    // 指标名可能很长（"Machine Learning Adaptive SuperTrend [MergeAlerts]"），
+    // 指标/条件各占一整行，名字才不会被下拉宽度截断
+    studySel.title = current.name;
+    condSel.title = curCond.title;
+    var condGrid = el('div', 'tvxa-stack');
     condGrid.appendChild(field('指标', studySel, inputsText(current.inputs) ? '参数：' + inputsText(current.inputs) : ''));
     condGrid.appendChild(field('条件', condSel));
 
