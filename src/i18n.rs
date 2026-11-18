@@ -652,8 +652,8 @@ impl Lang {
 
     pub fn p_running(&self) -> String {
         self.pick(
-            "该账号的实例还在运行，先停止再删除".into(),
-            "This account's instance is still running; stop it first".into(),
+            "该账号的实例还在运行，先停止再改名或删除".into(),
+            "This account's instance is still running; stop it before renaming or deleting".into(),
         )
     }
 

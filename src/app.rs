@@ -489,7 +489,9 @@ pub struct App {
     pending_delete: Option<String>,
     /// 用户已明确确认"用未验证版本构建副本"（风险确认，切换来源即失效）
     allow_unverified: bool,
-    /// 改名 / 复制的内联输入状态
+    /// 改名输入框：打开时把焦点丢进去并全选旧名（只请求一次）
+    focus_rename: bool,
+    /// 改名的内联输入状态
     name_edit: Option<NameEdit>,
 
     /// 托盘图标（Windows/macOS 才有；Linux 为 None）
@@ -522,6 +524,7 @@ impl App {
             add_error: None,
             pending_delete: None,
             allow_unverified: false,
+            focus_rename: false,
             name_edit: None,
             tray: None,
             tray_attempts: 0,
@@ -1506,6 +1509,8 @@ impl eframe::App for App {
                                                     source: name.clone(),
                                                     text: name.clone(),
                                                 });
+                                                // 打开就聚焦并全选旧名：点完直接敲新名字即可
+                                                self.focus_rename = true;
                                             }
                                             if ui.button(t.dir).clicked() {
                                                 open_path(dir);
@@ -1534,39 +1539,56 @@ impl eframe::App for App {
                                 });
                                 // 改名的内联输入：和删除确认一样贴在卡片上，不用弹窗
                                 if self.name_edit.as_ref().is_some_and(|e| e.source == *name) {
-                                    let mut text = self
-                                        .name_edit
-                                        .as_ref()
-                                        .map(|e| e.text.clone())
-                                        .unwrap_or_default();
+                                    let hint = self.cfg.lang.e_rename_hint();
+                                    let submit = t.submit.to_string();
+                                    let cancel_label = t.cancel.to_string();
+                                    let want_focus = std::mem::take(&mut self.focus_rename);
                                     let mut go = false;
                                     let mut cancel = false;
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(18.0);
-                                        let resp = ui.add(
-                                            egui::TextEdit::singleline(&mut text)
-                                                .hint_text(self.cfg.lang.e_rename_hint())
-                                                .desired_width(220.0),
-                                        );
-                                        let can = !busy && !text.trim().is_empty();
-                                        if ui
-                                            .add_enabled(can, egui::Button::new(t.submit))
-                                            .clicked()
-                                            || (can
-                                                && resp.lost_focus()
-                                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                                        {
-                                            go = true;
-                                        }
-                                        if ui.button(t.cancel).clicked() {
-                                            cancel = true;
-                                        }
-                                    });
+                                    let mut typed = String::new();
+                                    // 直接绑到 name_edit.text：早先每帧 clone 一份局部 String 再交给
+                                    // TextEdit，用户敲进去的字符会在下一帧被旧值覆盖，输入框等于只读。
+                                    if let Some(edit) = self.name_edit.as_mut() {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(18.0);
+                                            let output = egui::TextEdit::singleline(&mut edit.text)
+                                                .hint_text(&hint)
+                                                .desired_width(220.0)
+                                                .show(ui);
+                                            let resp = output.response;
+                                            if want_focus {
+                                                resp.request_focus();
+                                                // 全选旧名：点完「改名」直接敲就是替换
+                                                let mut state = output.state;
+                                                let len = edit.text.chars().count();
+                                                state.cursor.set_char_range(Some(
+                                                    egui::text::CCursorRange::two(
+                                                        egui::text::CCursor::new(0),
+                                                        egui::text::CCursor::new(len),
+                                                    ),
+                                                ));
+                                                state.store(ui.ctx(), resp.id);
+                                            }
+                                            let can = !busy && !edit.text.trim().is_empty();
+                                            if ui
+                                                .add_enabled(can, egui::Button::new(submit))
+                                                .clicked()
+                                                || (can
+                                                    && resp.lost_focus()
+                                                    && ui.input(|i| {
+                                                        i.key_pressed(egui::Key::Enter)
+                                                    }))
+                                            {
+                                                go = true;
+                                            }
+                                            if ui.button(cancel_label).clicked() {
+                                                cancel = true;
+                                            }
+                                        });
+                                        typed = edit.text.trim().to_string();
+                                    }
                                     if go {
-                                        act = Some(Act::Rename(
-                                            name.clone(),
-                                            text.trim().to_string(),
-                                        ));
+                                        act = Some(Act::Rename(name.clone(), typed));
                                     }
                                     if go || cancel {
                                         self.name_edit = None;
