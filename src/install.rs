@@ -41,13 +41,22 @@ pub struct Install {
 
 impl Install {
     /// 界面上显示的名字（随界面语言变化）
+    ///
+    /// 后面跟一个验证标记：补丁锚点只对白名单里的版本做过实测，其他版本必须
+    /// 在界面上看得出来，否则用户会以为"能构建 = 能正常用"。
     pub fn label(&self, t: &S) -> String {
-        match self.kind {
+        let base = match self.kind {
             InstallKind::Store => format!("{}  {}", t.kind_store, self.version),
             InstallKind::Portable => format!("{}  {}", t.kind_portable, self.root.display()),
             InstallKind::Custom => format!("{}  {}", t.kind_custom, self.root.display()),
             InstallKind::App => self.root.display().to_string(),
-        }
+        };
+        let tag = if patch::is_verified(&self.version) {
+            t.tag_verified
+        } else {
+            t.tag_unverified
+        };
+        format!("{base}  {tag}")
     }
 
     pub fn resources(&self) -> PathBuf {
@@ -329,6 +338,21 @@ pub fn newest_than<'a>(installs: &'a [Install], current: &str) -> Option<&'a Ins
         .max_by(|a, b| ver_key(&a.version).cmp(&ver_key(&b.version)))
 }
 
+/// 默认选源：**已验证版本优先**，都未验证时退回版本号最大的那份。
+///
+/// 客户端升级后旧安装目录常常还留在盘上，用户机器上因此可能同时有两三个版本。
+/// 「最新」正是锚点没验证过的那份，不该当默认；只有白名单里那版才默认选中。
+pub fn preferred_index(installs: &[Install]) -> Option<usize> {
+    if let Some(i) = installs.iter().position(|i| patch::is_verified(&i.version)) {
+        return Some(i);
+    }
+    installs
+        .iter()
+        .enumerate()
+        .max_by(|a, b| ver_key(&a.1.version).cmp(&ver_key(&b.1.version)))
+        .map(|(i, _)| i)
+}
+
 // ---------------------------------------------------------------- 发现安装
 
 pub fn discover() -> Vec<Install> {
@@ -516,6 +540,12 @@ pub fn build(
 ) -> Result<Managed> {
     if !src.looks_valid() {
         bail!(lang.b_incomplete(&src.root.display().to_string()));
+    }
+
+    // 未在白名单里的版本：先明说"锚点不是按它提的"，再让它尽力打。
+    // 打不上的条目会在 build_into 里逐条标记失败，不会静默当成功。
+    if !patch::is_verified(&src.version) {
+        log(lang.b_unverified(&src.version, patch::VERIFIED_VERSION));
     }
 
     let staging = staging_dir(dest);
@@ -748,6 +778,35 @@ mod tests {
         assert!(newest_than(&all, "3.10.0.1").is_none());
         // 只有非数字版本时不误报
         assert!(newest_than(&[mk("custom"), mk("portable")], "3.5.0.8375").is_none());
+    }
+
+    /// 默认选源必须落在白名单版本上，而不是"版本号最大"的那份。
+    /// 这就是"版本锁"的入口：客户端升级后盘上留着 3.6.x，默认不能选它。
+    #[test]
+    fn preferred_index_prefers_verified_version() {
+        let mk = |v: &str| Install {
+            version: v.into(),
+            kind: InstallKind::Custom,
+            root: PathBuf::from("C:/nope").join(v),
+        };
+        let all = vec![mk("3.5.0.8375"), mk("3.6.0.9000"), mk("custom")];
+        assert_eq!(preferred_index(&all), Some(0), "有已验证版本时选它");
+
+        // 都不在白名单：退回版本号最大的那份（保持原有行为，仍可构建但会弹风险确认）
+        let newer_only = vec![mk("3.6.0.9000"), mk("3.5.0.8375.1")];
+        assert_eq!(preferred_index(&newer_only), Some(0));
+
+        assert_eq!(preferred_index(&[]), None);
+    }
+
+    #[test]
+    fn verified_whitelist_is_consistent() {
+        // 白名单里至少要包含 "当前用于提取锚点" 的那个版本，否则界面提示会自相矛盾
+        assert!(patch::is_verified(patch::VERIFIED_VERSION));
+        assert!(!patch::is_verified("3.6.0.9000"));
+        // 非版本号（portable / custom / app）一律未验证
+        assert!(!patch::is_verified("portable"));
+        assert!(!patch::is_verified(""));
     }
 
     #[test]

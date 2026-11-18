@@ -81,6 +81,15 @@ pub struct S {
     pub kind_store: &'static str,
     pub kind_portable: &'static str,
     pub kind_custom: &'static str,
+    /// 版本白名单标记（列表里跟在版本号后面）
+    pub tag_verified: &'static str,
+    pub tag_unverified: &'static str,
+    /// 选中的构建源不在白名单里时的警告条
+    pub warn_unverified_src: &'static str,
+    pub chk_allow_unverified: &'static str,
+    pub btn_rebuild_anyway: &'static str,
+    pub copy_newer_unverified: &'static str,
+    pub copy_newer_unverified_hint: &'static str,
     // 日志面板
     pub log: &'static str,
     pub clear: &'static str,
@@ -128,8 +137,8 @@ static ZH: S = S {
     copy_bad_hint: "点右侧「生成 / 更新副本」修复",
     copy_unverified: "● 副本 {v} · 未验证（锚点按 {refv} 校验）",
     copy_unverified_hint: "补丁锚点是字面代码串，压缩标识符随版本漂移；失配时构建会显式报错，不会打一半",
-    copy_newer: "· 发现新版本 {v}",
-    copy_newer_hint: "系统里的 TradingView 已升到 {v}，副本仍停在当前版本。建议按新版本重建副本——新版本的 JS 结构可能已变，补丁锚点会失配",
+    copy_newer: "· 发现新版 {v}（已验证）",
+    copy_newer_hint: "系统里的 TradingView 已升到 {v}，该版本在白名单里，重建副本后仍是完整支持的状态；不重建也能继续用当前副本",
     btn_rebuild: "重建副本",
     features: "功能",
     cb_ads: "拦截广告/追踪网络",
@@ -159,6 +168,13 @@ static ZH: S = S {
     kind_store: "Microsoft Store",
     kind_portable: "本地安装",
     kind_custom: "手动指定",
+    tag_verified: "✓ 已验证",
+    tag_unverified: "未验证",
+    warn_unverified_src: "⚠ 所选版本 {v} 不在已验证名单里：补丁锚点按 {refv} 提取，某些开关可能失效。副本会照常生成，打不上的条目会逐条列在日志里。",
+    chk_allow_unverified: "我了解风险，仍要用该版本构建副本",
+    btn_rebuild_anyway: "仍要重建（未验证）",
+    copy_newer_unverified: "· 发现新版 {v}（未验证，不建议升级副本）",
+    copy_newer_unverified_hint: "系统里的 TradingView 已升到 {v}，但补丁锚点是按 3.5.0.8375 提取的，新版 JS 的压缩标识符很可能已变化。当前副本自包含，客户端升级不会影响它，可以继续用；除非有明确需要，不必重建。",
     log: "日志",
     clear: "清空",
     accounts: "账号",
@@ -204,8 +220,8 @@ static EN: S = S {
     copy_bad_hint: "Click \"Build / Update copy\" to repair",
     copy_unverified: "● Copy {v} · unverified (anchors checked against {refv})",
     copy_unverified_hint: "Patch anchors are literal code strings; minified identifiers drift between versions. On mismatch the build fails loudly instead of half-applying",
-    copy_newer: "· newer {v} found",
-    copy_newer_hint: "The installed TradingView is now {v} but the managed copy is still on the old version. Rebuild the copy - the JS structure may have changed and the anchors will miss",
+    copy_newer: "· newer {v} found (verified)",
+    copy_newer_hint: "The installed TradingView is now {v}, which is on the verified list; rebuilding keeps full support. Keeping the current copy works too",
     btn_rebuild: "Rebuild copy",
     features: "Features",
     cb_ads: "Block ads & trackers",
@@ -235,6 +251,13 @@ static EN: S = S {
     kind_store: "Microsoft Store",
     kind_portable: "Local install",
     kind_custom: "Manual",
+    tag_verified: "✓ verified",
+    tag_unverified: "unverified",
+    warn_unverified_src: "⚠ Version {v} is not on the verified list: anchors were extracted from {refv}, so some switches may fail. The copy is still built, and every patch that misses is listed in the log.",
+    chk_allow_unverified: "I understand the risk and want to build from this version anyway",
+    btn_rebuild_anyway: "Rebuild anyway (unverified)",
+    copy_newer_unverified: "· newer {v} found (unverified, not recommended)",
+    copy_newer_unverified_hint: "The installed TradingView is now {v}, but the anchors were extracted from 3.5.0.8375 and minified identifiers likely moved. The managed copy is self-contained, so a client update does not affect it - keep using it unless you have a real reason to rebuild.",
     log: "Log",
     clear: "Clear",
     accounts: "Accounts",
@@ -589,6 +612,16 @@ impl Lang {
         )
     }
 
+    /// 拿未验证版本构建副本、但没勾确认时拦下
+    pub fn e_unverified_blocked(&self, v: &str) -> String {
+        self.pick(
+            format!("版本 {v} 未经验证：请先在上方勾选「我了解风险，仍要用该版本构建副本」"),
+            format!(
+                "Version {v} is unverified - tick the risk confirmation above before building from it"
+            ),
+        )
+    }
+
     pub fn p_dir_exists(&self, name: &str) -> String {
         self.pick(
             format!("账号「{name}」已存在"),
@@ -652,6 +685,15 @@ impl Lang {
         self.pick(
             format!("这个来源不完整（缺可执行文件或 resources/app.asar）：{path}"),
             format!("Incomplete source (missing executable or resources/app.asar): {path}"),
+        )
+    }
+
+    pub fn b_unverified(&self, v: &str, refv: &str) -> String {
+        self.pick(
+            format!("⚠ 来源版本 {v} 不在已验证名单（锚点按 {refv} 提取），下面逐条标记结果"),
+            format!(
+                "⚠ Source version {v} is not on the verified list (anchors from {refv}); each patch below is reported individually"
+            ),
         )
     }
 

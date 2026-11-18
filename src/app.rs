@@ -456,6 +456,8 @@ pub struct App {
     add_error: Option<String>,
 
     pending_delete: Option<String>,
+    /// 用户已明确确认"用未验证版本构建副本"（风险确认，切换来源即失效）
+    allow_unverified: bool,
     /// 改名 / 复制的内联输入状态
     name_edit: Option<NameEdit>,
 
@@ -488,6 +490,7 @@ impl App {
             new_name: String::new(),
             add_error: None,
             pending_delete: None,
+            allow_unverified: false,
             name_edit: None,
             tray: None,
             tray_attempts: 0,
@@ -505,9 +508,8 @@ impl App {
 
     fn reload(&mut self) {
         self.installs = install::discover();
-        if self.selected >= self.installs.len() {
-            self.selected = 0;
-        }
+        // 默认落在已验证版本上：客户端升级后旧目录常还在，"最新"恰恰是没验证过的那份
+        self.selected = install::preferred_index(&self.installs).unwrap_or(0);
         self.managed = install::load_managed();
         self.profiles = profiles::list();
         self.status = profiles::status_snapshot(&self.profiles);
@@ -545,6 +547,15 @@ impl App {
         let shared = self.shared.clone();
         let need_copy = self.managed.is_none();
         let inst = self.installs.get(self.selected).cloned();
+        // 兜底：按钮被回车绕过时也拦住未验证来源（界面上的确认是唯一放行条件）
+        if need_copy {
+            if let Some(i) = &inst {
+                if !patch::is_verified(&i.version) && !self.allow_unverified {
+                    self.add_error = Some(lang.e_unverified_blocked(&i.version));
+                    return;
+                }
+            }
+        }
         let flags = self.cfg.flags();
         {
             let mut s = shared.lock().unwrap();
@@ -831,6 +842,10 @@ impl App {
                 let Some(inst) = self.installs.get(idx).cloned() else {
                     return;
                 };
+                if !patch::is_verified(&inst.version) && !self.allow_unverified {
+                    self.log(lang.e_unverified_blocked(&inst.version));
+                    return;
+                }
                 let Some(old) = self.managed.as_ref().map(|m| m.version.clone()) else {
                     return;
                 };
@@ -913,7 +928,7 @@ impl eframe::App for App {
         if let Some(sc) = scan {
             self.installs = sc.installs;
             if self.selected >= self.installs.len() {
-                self.selected = 0;
+                self.selected = install::preferred_index(&self.installs).unwrap_or(0);
             }
             self.managed = sc.managed;
             self.profiles = sc.profiles;
@@ -1012,16 +1027,33 @@ impl eframe::App for App {
         let managed_ver = self.managed.as_ref().map(|m| m.version.clone());
         // 客户端升级后副本还停在旧版：这里只做提示，不自动重建（副本 200MB+，
         // 而且新旧版本可能同时在用，删谁必须由人决定）。
-        let newer: Option<(usize, String)> = managed_ver.as_deref().and_then(|cur| {
+        // 第三项 = 该新版是否在白名单里，决定提示语气与是否允许一键重建。
+        let newer: Option<(usize, String, bool)> = managed_ver.as_deref().and_then(|cur| {
             let hit = install::newest_than(&self.installs, cur)?;
             let idx = self.installs.iter().position(|i| i.root == hit.root)?;
-            Some((idx, hit.version.clone()))
+            Some((idx, hit.version.clone(), patch::is_verified(&hit.version)))
         });
         let patched = self
             .managed
             .as_ref()
             .map(|m| m.is_patched(&self.cfg.flags()))
             .unwrap_or(false);
+
+        // 本次若真要构建副本，源是哪个版本、是否已验证。没副本时源 = 选中的安装，
+        // 有副本时只有「按新版重建」会触发构建——两种情况分开算，别用同一个开关。
+        let sel_install = self.installs.get(self.selected);
+        let sel_ver = sel_install.map(|i| i.version.clone());
+        let build_src_unverified: Option<String> = if !managed_ok {
+            sel_ver.filter(|v| !patch::is_verified(v))
+        } else {
+            newer
+                .as_ref()
+                .filter(|(_, v, ok)| !ok && !patch::is_verified(v))
+                .map(|(_, v, _)| v.clone())
+        };
+        let allow_unv = self.allow_unverified;
+        // 真正会走构建的动作能不能点：源已验证，或用户已勾选确认
+        let can_build = build_src_unverified.is_none() || allow_unv;
 
         let mut act: Option<Act> = None;
         let mut lang_changed = false;
@@ -1058,8 +1090,13 @@ impl eframe::App for App {
                 if install_labels.is_empty() {
                     ui.colored_label(AMBER, t.no_tv);
                 } else {
+                    let sel_before = self.selected;
                     for (i, label) in install_labels.iter().enumerate() {
                         ui.selectable_value(&mut self.selected, i, label);
+                    }
+                    if self.selected != sel_before {
+                        // 换来源 = 换风险：之前对"未验证版本"的确认必须作废
+                        self.allow_unverified = false;
                     }
                 }
                 ui.separator();
@@ -1076,7 +1113,7 @@ impl eframe::App for App {
                         )
                         .on_hover_text(t.copy_bad_hint);
                     }
-                    Some(v) if v == patch::VERIFIED_VERSION => {
+                    Some(v) if patch::is_verified(v) => {
                         ui.colored_label(
                             GREEN,
                             egui::RichText::new(t.copy_ok.replace("{v}", v)).small(),
@@ -1097,18 +1134,61 @@ impl eframe::App for App {
                     }
                 }
 
-                if let Some((idx, v)) = &newer {
+                if let Some((idx, v, verified)) = &newer {
                     ui.separator();
-                    ui.colored_label(
-                        GREEN,
-                        egui::RichText::new(t.copy_newer.replace("{v}", v)).small(),
-                    )
-                    .on_hover_text(t.copy_newer_hint);
-                    if ui.small_button(t.btn_rebuild).clicked() {
-                        act = Some(Act::RebuildCopy(*idx));
+                    if *verified {
+                        ui.colored_label(
+                            GREEN,
+                            egui::RichText::new(t.copy_newer.replace("{v}", v)).small(),
+                        )
+                        .on_hover_text(t.copy_newer_hint);
+                        if ui.small_button(t.btn_rebuild).clicked() {
+                            act = Some(Act::RebuildCopy(*idx));
+                        }
+                    } else {
+                        // 新版不在白名单：不劝重建，重建按钮也上锁——副本本身是自包含的，
+                        // 客户端升级不会影响它，多数情况下"什么都不做"才是对的。
+                        ui.colored_label(
+                            AMBER,
+                            egui::RichText::new(t.copy_newer_unverified.replace("{v}", v)).small(),
+                        )
+                        .on_hover_text(t.copy_newer_unverified_hint);
+                        if ui
+                            .add_enabled(can_build, egui::Button::new(t.btn_rebuild_anyway).small())
+                            .on_disabled_hover_text(t.chk_allow_unverified)
+                            .clicked()
+                        {
+                            act = Some(Act::RebuildCopy(*idx));
+                        }
                     }
                 }
             });
+
+            // 未验证版本的风险确认条：只有真要拿它构建副本时才出现
+            if let Some(v) = &build_src_unverified {
+                ui.add_space(6.0);
+                egui::Frame::none()
+                    .fill(AMBER_DIM)
+                    .rounding(6.0)
+                    .inner_margin(egui::vec2(12.0, 8.0))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    t.warn_unverified_src
+                                        .replace("{v}", v)
+                                        .replace("{refv}", patch::VERIFIED_VERSION),
+                                )
+                                .color(AMBER)
+                                .small(),
+                            );
+                            ui.checkbox(
+                                &mut self.allow_unverified,
+                                egui::RichText::new(t.chk_allow_unverified).small(),
+                            );
+                        });
+                    });
+            }
 
             // 未检测到 TradingView 时，给一个醒目的安装提醒（而非让用户对着空列表猜）
             if install_labels.is_empty() {
@@ -1123,7 +1203,8 @@ impl eframe::App for App {
                             if ui.button(t.rescan).clicked() {
                                 self.installs = install::discover();
                                 if self.selected >= self.installs.len() {
-                                    self.selected = 0;
+                                    self.selected =
+                                        install::preferred_index(&self.installs).unwrap_or(0);
                                 }
                                 self.wake_scanner();
                             }
@@ -1311,7 +1392,10 @@ impl eframe::App for App {
                             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                                 act = Some(Act::SubmitAdd);
                             }
-                            let can_submit = !busy && !self.new_name.trim().is_empty();
+                            // 没副本时"添加账号"会顺带构建副本：源未验证就必须先确认
+                            let can_submit = !busy
+                                && !self.new_name.trim().is_empty()
+                                && (managed_ok || can_build);
                             if ui
                                 .add_enabled(can_submit, egui::Button::new(t.submit))
                                 .on_disabled_hover_text(t.name_hint)
