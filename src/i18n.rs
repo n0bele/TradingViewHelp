@@ -357,14 +357,11 @@ impl Lang {
         )
     }
 
-    /// 改名 / 复制：按钮、输入提示与日志
+    /// 改名：按钮、输入提示与日志
     pub fn btn_rename(&self) -> String {
         self.pick("改名".into(), "Rename".into())
     }
 
-    pub fn btn_duplicate(&self) -> String {
-        self.pick("复制".into(), "Duplicate".into())
-    }
 
     pub fn e_rename_hint(&self) -> String {
         self.pick(
@@ -373,17 +370,7 @@ impl Lang {
         )
     }
 
-    pub fn e_duplicate_hint(&self) -> String {
-        self.pick(
-            "副本名字（登录态一起带走：等于同一账号再开一个窗口）".into(),
-            "Copy name (login state is copied: same account, second window)".into(),
-        )
-    }
 
-    /// 复制账号时预填的名字后缀
-    pub fn e_copy_suffix(&self) -> String {
-        self.pick("-副本".into(), "-copy".into())
-    }
 
     pub fn log_renamed(&self, old: &str, new: &str) -> String {
         self.pick(
@@ -396,23 +383,8 @@ impl Lang {
         self.pick(format!("改名失败：{e}"), format!("Rename failed: {e}"))
     }
 
-    pub fn log_duplicating(&self, from: &str, to: &str) -> String {
-        self.pick(
-            format!("正在复制「{from}」→「{to}」（账号目录较大时需等一会）…"),
-            format!("Copying \"{from}\" → \"{to}\" (may take a while for large profiles)…"),
-        )
-    }
 
-    pub fn log_duplicated(&self, name: &str) -> String {
-        self.pick(
-            format!("已复制出「{name}」"),
-            format!("Duplicated as \"{name}\""),
-        )
-    }
 
-    pub fn log_duplicate_failed(&self, e: &str) -> String {
-        self.pick(format!("复制失败：{e}"), format!("Duplicate failed: {e}"))
-    }
 
     /// 登录页打开方式（应用内标签页 / 无痕窗口 / 默认浏览器）
     pub fn log_login_in_app(&self) -> String {
@@ -630,15 +602,20 @@ impl Lang {
     }
 
     /// 同账号多开时的提示（允许启动，但要让用户知道风险）
+    ///
+    /// 说清楚是"服务端同一个账号"，不是"本地共用一份文件"——两个档案各存各的登录态，
+    /// 本地互不影响；风险在服务端那侧。
     pub fn warn_same_account(&self, name: &str, other: &str, uid: &str) -> String {
         self.pick(
             format!(
-                "「{name}」和「{other}」登录的是同一个账号（{uid}）：两个窗口共用一份登录态，\
-                 TradingView 服务端可能限制同账号并发，出现行情停更就关掉其中一个"
+                "「{name}」和「{other}」登录的是同一个 TradingView 账号（{uid}）：两份档案的登录态\
+                 各自独立保存、互不影响，但服务端看到的是同一账号的两个连接，可能限制并发——\
+                 出现行情停更就关掉其中一个"
             ),
             format!(
-                "\"{name}\" and \"{other}\" are signed in to the same account ({uid}). Both windows \
-                 share one login session; if feeds stop updating, close one of them"
+                "\"{name}\" and \"{other}\" are signed in to the same TradingView account ({uid}). \
+                 Each profile keeps its own session, but the server sees two connections for one \
+                 account and may throttle them; if feeds stop updating, close one window"
             ),
         )
     }
@@ -655,12 +632,12 @@ impl Lang {
     pub fn log_account_same(&self, name: &str, other: &str, uid: &str) -> String {
         self.pick(
             format!(
-                "⚠ 「{name}」和「{other}」是同一个账号（{uid}）：同一账号多开会被服务端限制，\
-                 表现为某个窗口行情停止更新；建议一个账号只留一个档案"
+                "⚠ 「{name}」和「{other}」是同一个账号（{uid}）：多开会不会被服务端限流我们说了不算，\
+                 出现行情停更就关掉其中一个"
             ),
             format!(
-                "⚠ \"{name}\" and \"{other}\" share the same account ({uid}): running one account \
-                 in two instances hits the server limit and feeds stop updating; keep one profile per account"
+                "⚠ \"{name}\" and \"{other}\" are the same account ({uid}): whether the server \
+                 throttles concurrent sessions is out of our hands — if feeds stop updating, close one"
             ),
         )
     }
@@ -679,6 +656,7 @@ impl Lang {
             "This account's instance is still running; stop it first".into(),
         )
     }
+
 
     // ---------------------------------------------------------- 构建过程日志
     pub fn b_incomplete(&self, path: &str) -> String {

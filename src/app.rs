@@ -384,6 +384,8 @@ fn run_job(ctx: &egui::Context, shared: Arc<Mutex<Shared>>, clear: bool, job: Jo
         s.busy = false;
         wake(&s);
         match res {
+            // 任务已经把细节自己 push 进日志时就返回空串：别再多出一行光秃秃的「●」
+            Ok(m) if m.trim().is_empty() => {}
             Ok(m) => s.log.push(format!("● {m}")),
             Err(e) => s.log.push(format!("× {e:#}")),
         }
@@ -410,17 +412,10 @@ fn spawn_scan_thread(ctx: egui::Context, shared: Arc<Mutex<Shared>>) {
     });
 }
 
-/// 账号卡片上的内联输入（改名 / 复制）：`source` 是原账号名
+/// 账号卡片上的内联改名输入：`source` 是原账号名
 struct NameEdit {
     source: String,
-    kind: EditKind,
     text: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EditKind {
-    Rename,
-    Duplicate,
 }
 
 enum Act {
@@ -430,7 +425,6 @@ enum Act {
     StopAll,
     Delete(String),
     Rename(String, String),
-    Duplicate(String, String),
     SubmitAdd,
     ReapplyPatches,
     /// 按指定的安装重建托管副本（客户端升级后副本还停在旧版本时用）
@@ -825,26 +819,6 @@ impl App {
                         Err(e) => self.log(lang.log_rename_failed(&format!("{e:#}"))),
                     }
                 }
-                self.wake_scanner();
-            }
-            Act::Duplicate(from, to) => {
-                let Some(p) = self.profiles.iter().find(|p| p.name == from).cloned() else {
-                    return;
-                };
-                // 账号目录动辄几百 MB，放后台复制，别冻住界面
-                run_job(
-                    ctx,
-                    self.shared.clone(),
-                    false,
-                    Box::new(move |push| {
-                        push(lang.log_duplicating(&p.name, &to));
-                        match profiles::duplicate(&p, &to, lang) {
-                            Ok(np) => push(lang.log_duplicated(&np.name)),
-                            Err(e) => push(lang.log_duplicate_failed(&format!("{e:#}"))),
-                        }
-                        Ok(String::new())
-                    }),
-                );
                 self.wake_scanner();
             }
             Act::ReapplyPatches => {
@@ -1530,15 +1504,7 @@ impl eframe::App for App {
                                             if ui.button(self.cfg.lang.btn_rename()).clicked() {
                                                 self.name_edit = Some(NameEdit {
                                                     source: name.clone(),
-                                                    kind: EditKind::Rename,
                                                     text: name.clone(),
-                                                });
-                                            }
-                                            if ui.button(self.cfg.lang.btn_duplicate()).clicked() {
-                                                self.name_edit = Some(NameEdit {
-                                                    source: name.clone(),
-                                                    kind: EditKind::Duplicate,
-                                                    text: format!("{}{}", name, self.cfg.lang.e_copy_suffix()),
                                                 });
                                             }
                                             if ui.button(t.dir).clicked() {
@@ -1566,13 +1532,8 @@ impl eframe::App for App {
                                         },
                                     );
                                 });
-                                // 改名 / 复制的内联输入：和删除确认一样贴在卡片上，不用弹窗
-                                if let Some(kind) = self
-                                    .name_edit
-                                    .as_ref()
-                                    .filter(|e| e.source == *name)
-                                    .map(|e| e.kind)
-                                {
+                                // 改名的内联输入：和删除确认一样贴在卡片上，不用弹窗
+                                if self.name_edit.as_ref().is_some_and(|e| e.source == *name) {
                                     let mut text = self
                                         .name_edit
                                         .as_ref()
@@ -1582,13 +1543,9 @@ impl eframe::App for App {
                                     let mut cancel = false;
                                     ui.horizontal(|ui| {
                                         ui.add_space(18.0);
-                                        let hint = match kind {
-                                            EditKind::Rename => self.cfg.lang.e_rename_hint(),
-                                            EditKind::Duplicate => self.cfg.lang.e_duplicate_hint(),
-                                        };
                                         let resp = ui.add(
                                             egui::TextEdit::singleline(&mut text)
-                                                .hint_text(hint)
+                                                .hint_text(self.cfg.lang.e_rename_hint())
                                                 .desired_width(220.0),
                                         );
                                         let can = !busy && !text.trim().is_empty();
@@ -1606,11 +1563,10 @@ impl eframe::App for App {
                                         }
                                     });
                                     if go {
-                                        let to = text.trim().to_string();
-                                        act = Some(match kind {
-                                            EditKind::Rename => Act::Rename(name.clone(), to),
-                                            EditKind::Duplicate => Act::Duplicate(name.clone(), to),
-                                        });
+                                        act = Some(Act::Rename(
+                                            name.clone(),
+                                            text.trim().to_string(),
+                                        ));
                                     }
                                     if go || cancel {
                                         self.name_edit = None;

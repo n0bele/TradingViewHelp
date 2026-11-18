@@ -269,59 +269,6 @@ pub fn rename(profile: &Profile, new_name: &str, lang: Lang) -> Result<Profile> 
     })
 }
 
-/// 复制档案：整份复制账号目录（登录态一起带走）。
-/// `.tvx-pid` 不复制——副本必须是"未启动"状态。
-/// `.tvx-user` 保留，所以副本仍是**同一个 TradingView 账号**：等于同一账号开第二个窗口
-/// （每个档案一个 --user-data-dir，客户端本身允许多实例）。服务端是否限制同账号并发
-/// 我们说了不算，所以启动时只给提示、不拦。
-pub fn duplicate(profile: &Profile, new_name: &str, lang: Lang) -> Result<Profile> {
-    let new_name = validate_name(new_name, lang)?;
-    let new_dir = profiles_root().join(&new_name);
-    if new_dir.exists() {
-        bail!(lang.p_dir_exists(&new_name));
-    }
-    fs::create_dir_all(&new_dir)?;
-    let result = (|| -> Result<()> {
-        for entry in fs::read_dir(&profile.dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if name == ".tvx-pid" {
-                continue;
-            }
-            let to = new_dir.join(&name);
-            if entry.file_type()?.is_dir() {
-                copy_dir(&entry.path(), &to)?;
-            } else {
-                fs::copy(entry.path(), &to)?;
-            }
-        }
-        Ok(())
-    })();
-    if let Err(e) = result {
-        // 复制一半的目录没有任何价值，直接清掉，别给用户留个"看起来存在"的坏档案
-        let _ = fs::remove_dir_all(&new_dir);
-        return Err(e);
-    }
-    Ok(Profile {
-        name: new_name,
-        dir: new_dir,
-    })
-}
-
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let dest = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &dest)?;
-        } else {
-            fs::copy(entry.path(), &dest)?;
-        }
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------- 进程
 
 fn pid_file(profile_dir: &Path) -> PathBuf {
@@ -1336,41 +1283,6 @@ mod multi_tests {
 
         for p in &made {
             remove(p, Lang::Zh).ok();
-        }
-    }
-
-    /// 复制出来的档案要能**和原档案同时运行**（同账号多开）。
-    /// 老版本在 launch 里直接拒绝同账号第二个实例，这条用例就是那个回归的护栏。
-    #[test]
-    #[ignore = "会真的启动两个 TradingView 实例"]
-    fn duplicate_launches_beside_original() {
-        let managed = install::load_managed().expect("先生成免弹窗副本");
-        let (a, b) = ("tvx-dup-a", "tvx-dup-b");
-        for n in [a, b] {
-            let d = profiles_root().join(n);
-            if d.exists() {
-                fs::remove_dir_all(&d).ok();
-            }
-        }
-        let pa = create(a, Lang::Zh).expect("建档案失败");
-        // 模拟"已经登录过"：绑定账号 ID，复制后两个档案会被认作同一账号
-        fs::write(pa.dir.join(UID_FILE), "123456").expect("写账号绑定失败");
-        let pb = duplicate(&pa, b, Lang::Zh).expect("复制失败");
-        assert_eq!(account_id(&pb).as_deref(), Some("123456"), "登录态应随目录一起复制");
-
-        let l1 = launch(&managed, &pa, Lang::Zh).expect("原档案启动失败");
-        let l2 = launch(&managed, &pb, Lang::Zh).expect("副本启动失败（同账号不应被拦）");
-        assert!(l2.warning.is_some(), "同账号多开要给出提示");
-        eprintln!("同账号两实例 PID: {} / {}", l1.pid, l2.pid);
-        std::thread::sleep(std::time::Duration::from_secs(9));
-        assert!(is_alive(l1.pid) && is_alive(l2.pid), "两个实例应同时存活");
-
-        stop(l1.pid).ok();
-        stop(l2.pid).ok();
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        assert!(!is_alive(l1.pid) && !is_alive(l2.pid), "没停干净");
-        for p in [pa, pb] {
-            remove(&p, Lang::Zh).ok();
         }
     }
 }
