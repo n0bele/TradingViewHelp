@@ -131,7 +131,7 @@ static ZH: S = S {
     rescan: "重新检测",
     copy_none: "● 副本未生成",
     copy_none_hint: "点右侧「生成 / 更新副本」",
-    copy_ok: "● 副本 {v} · 补丁完好 ✓",
+    copy_ok: "● 副本 {v} · 补丁完好",
     copy_ok_hint: "锚点按该版本 index.js 提取并端到端实测；改开关会自动重打补丁",
     copy_bad: "● 副本 {v} · 补丁异常",
     copy_bad_hint: "点右侧「生成 / 更新副本」修复",
@@ -168,7 +168,7 @@ static ZH: S = S {
     kind_store: "Microsoft Store",
     kind_portable: "本地安装",
     kind_custom: "手动指定",
-    tag_verified: "✓ 已验证",
+    tag_verified: "● 已验证",
     tag_unverified: "未验证",
     warn_unverified_src: "⚠ 所选版本 {v} 不在已验证名单里：补丁锚点按 {refv} 提取，某些开关可能失效。副本会照常生成，打不上的条目会逐条列在日志里。",
     chk_allow_unverified: "我了解风险，仍要用该版本构建副本",
@@ -214,7 +214,7 @@ static EN: S = S {
     rescan: "Rescan",
     copy_none: "● Copy not built",
     copy_none_hint: "Click \"Build / Update copy\" on the right",
-    copy_ok: "● Copy {v} · patches OK ✓",
+    copy_ok: "● Copy {v} · patches OK",
     copy_ok_hint: "Anchors extracted from this version's index.js and verified end-to-end; toggling options re-applies automatically",
     copy_bad: "● Copy {v} · patches broken",
     copy_bad_hint: "Click \"Build / Update copy\" to repair",
@@ -251,7 +251,7 @@ static EN: S = S {
     kind_store: "Microsoft Store",
     kind_portable: "Local install",
     kind_custom: "Manual",
-    tag_verified: "✓ verified",
+    tag_verified: "● verified",
     tag_unverified: "unverified",
     warn_unverified_src: "⚠ Version {v} is not on the verified list: anchors were extracted from {refv}, so some switches may fail. The copy is still built, and every patch that misses is listed in the log.",
     chk_allow_unverified: "I understand the risk and want to build from this version anyway",
@@ -334,8 +334,8 @@ impl Lang {
 
     pub fn log_launch_one_failed(&self, name: &str, e: &str) -> String {
         self.pick(
-            format!("✗ 「{name}」{e}"),
-            format!("✗ \"{name}\": {e}"),
+            format!("× 「{name}」{e}"),
+            format!("× \"{name}\": {e}"),
         )
     }
 
@@ -574,8 +574,8 @@ impl Lang {
 
     pub fn log_reapplied_headless(&self, path: &str) -> String {
         self.pick(
-            format!("✓ 补丁已按当前开关重打到 {path}"),
-            format!("✓ Patches re-applied to {path}"),
+            format!("● 补丁已按当前开关重打到 {path}"),
+            format!("● Patches re-applied to {path}"),
         )
     }
 

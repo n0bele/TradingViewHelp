@@ -55,7 +55,7 @@ pub fn reapply_headless() {
             // 报警功能的资源文件（引擎 / 主进程模块 / preload 桥）随开关一起落盘或清除
             if let Some(dir) = m.index_js().parent() {
                 if let Err(e) = patch::install_assets(dir, &cfg.flags()) {
-                    eprintln!("✗ 报警资源写入失败：{e:#}");
+                    eprintln!("× 报警资源写入失败：{e:#}");
                 }
             }
             println!(
@@ -63,7 +63,7 @@ pub fn reapply_headless() {
                 lang.log_reapplied_headless(&m.index_js().display().to_string())
             );
         }
-        Err(e) => eprintln!("✗ {e:#}"),
+        Err(e) => eprintln!("× {e:#}"),
     }
 }
 
@@ -384,8 +384,8 @@ fn run_job(ctx: &egui::Context, shared: Arc<Mutex<Shared>>, clear: bool, job: Jo
         s.busy = false;
         wake(&s);
         match res {
-            Ok(m) => s.log.push(format!("✓ {m}")),
-            Err(e) => s.log.push(format!("✗ {e:#}")),
+            Ok(m) => s.log.push(format!("● {m}")),
+            Err(e) => s.log.push(format!("× {e:#}")),
         }
         drop(s);
         ctx.request_repaint();
@@ -435,6 +435,43 @@ enum Act {
     ReapplyPatches,
     /// 按指定的安装重建托管副本（客户端升级后副本还停在旧版本时用）
     RebuildCopy(usize),
+}
+
+/// 构建门禁的判定：本次构建的源版本是否不在已验证白名单里。
+///
+/// 只回答"源有没有验证过"，不掺用户是否已经确认——确认与否只决定按钮能不能点。
+/// 早先把两者混在一起，导致勾了确认后警告条整条消失，用户既看不到自己勾过什么，
+/// 也没法反悔（只能切换来源才能重置）。
+fn unverified_target(
+    managed_ok: bool,
+    sel_ver: Option<&str>,
+    newer: Option<(&str, bool)>,
+) -> Option<String> {
+    let target = if managed_ok {
+        // newer = (版本号, 是否已验证)；已验证的新版不需要确认
+        newer.filter(|(_, verified)| !*verified).map(|(v, _)| v)
+    } else {
+        sel_ver
+    };
+    target
+        .filter(|v| !patch::is_verified(v))
+        .map(|v| v.to_string())
+}
+
+/// 能否真的执行构建：源已验证，或用户已经勾过风险确认。
+fn build_allowed(target: Option<&str>, allow_unverified: bool) -> bool {
+    target.is_none() || allow_unverified
+}
+
+/// 版本号在界面上的叫法：`custom` / `portable` / `app` 是内部占位值，别直接甩给用户看。
+fn source_name(v: &str, lang: Lang) -> String {
+    let t = lang.s();
+    match v {
+        "custom" => t.kind_custom.to_string(),
+        "portable" => t.kind_portable.to_string(),
+        "app" => "App".to_string(),
+        other => other.to_string(),
+    }
 }
 
 pub struct App {
@@ -551,7 +588,8 @@ impl App {
         if need_copy {
             if let Some(i) = &inst {
                 if !patch::is_verified(&i.version) && !self.allow_unverified {
-                    self.add_error = Some(lang.e_unverified_blocked(&i.version));
+                    self.add_error =
+                        Some(lang.e_unverified_blocked(&source_name(&i.version, lang)));
                     return;
                 }
             }
@@ -579,7 +617,7 @@ impl App {
                     let msg = lang.log_no_source();
                     let mut s = shared.lock().unwrap();
                     s.busy = false;
-                    s.log.push(format!("✗ {msg}"));
+                    s.log.push(format!("× {msg}"));
                     s.add_done = Some(Err(msg));
                     return;
                 };
@@ -593,7 +631,7 @@ impl App {
                         let msg = lang.log_create_failed(&format!("{e:#}"));
                         let mut s = shared.lock().unwrap();
                         s.busy = false;
-                        s.log.push(format!("✗ {msg}"));
+                        s.log.push(format!("× {msg}"));
                         s.add_done = Some(Err(msg));
                         return;
                     }
@@ -607,14 +645,14 @@ impl App {
             match res {
                 Ok(p) => {
                     s.log.push(format!(
-                        "✓ {}",
+                        "● {}",
                         lang.log_created(&p.name, &p.dir.display().to_string())
                     ));
                     s.add_done = Some(Ok(()));
                 }
                 Err(e) => {
                     let msg = lang.log_create_failed(&format!("{e:#}"));
-                    s.log.push(format!("✗ {msg}"));
+                    s.log.push(format!("× {msg}"));
                     s.add_done = Some(Err(msg));
                 }
             }
@@ -843,7 +881,7 @@ impl App {
                     return;
                 };
                 if !patch::is_verified(&inst.version) && !self.allow_unverified {
-                    self.log(lang.e_unverified_blocked(&inst.version));
+                    self.log(lang.e_unverified_blocked(&source_name(&inst.version, lang)));
                     return;
                 }
                 let Some(old) = self.managed.as_ref().map(|m| m.version.clone()) else {
@@ -1040,20 +1078,14 @@ impl eframe::App for App {
             .unwrap_or(false);
 
         // 本次若真要构建副本，源是哪个版本、是否已验证。没副本时源 = 选中的安装，
-        // 有副本时只有「按新版重建」会触发构建——两种情况分开算，别用同一个开关。
-        let sel_install = self.installs.get(self.selected);
-        let sel_ver = sel_install.map(|i| i.version.clone());
-        let build_src_unverified: Option<String> = if !managed_ok {
-            sel_ver.filter(|v| !patch::is_verified(v))
-        } else {
-            newer
-                .as_ref()
-                .filter(|(_, v, ok)| !ok && !patch::is_verified(v))
-                .map(|(_, v, _)| v.clone())
-        };
-        let allow_unv = self.allow_unverified;
-        // 真正会走构建的动作能不能点：源已验证，或用户已勾选确认
-        let can_build = build_src_unverified.is_none() || allow_unv;
+        // 有副本时只有「按新版重建」会触发构建——两种情况分开算。
+        let sel_ver = self.installs.get(self.selected).map(|i| i.version.as_str());
+        let build_src_unverified = unverified_target(
+            managed_ok,
+            sel_ver,
+            newer.as_ref().map(|(_, v, ok)| (v.as_str(), *ok)),
+        );
+        let can_build = build_allowed(build_src_unverified.as_deref(), self.allow_unverified);
 
         let mut act: Option<Act> = None;
         let mut lang_changed = false;
@@ -1164,8 +1196,9 @@ impl eframe::App for App {
                 }
             });
 
-            // 未验证版本的风险确认条：只有真要拿它构建副本时才出现
+            // 未验证版本的风险确认条：源没验证过就一直显示，勾不勾只影响按钮能不能点
             if let Some(v) = &build_src_unverified {
+                let shown = source_name(v, self.cfg.lang);
                 ui.add_space(6.0);
                 egui::Frame::none()
                     .fill(AMBER_DIM)
@@ -1176,7 +1209,7 @@ impl eframe::App for App {
                             ui.label(
                                 egui::RichText::new(
                                     t.warn_unverified_src
-                                        .replace("{v}", v)
+                                        .replace("{v}", &shown)
                                         .replace("{refv}", patch::VERIFIED_VERSION),
                                 )
                                 .color(AMBER)
@@ -1321,8 +1354,8 @@ impl eframe::App for App {
                         for line in &log {
                             let mut rt = egui::RichText::new(line).monospace().small();
                             match line.chars().next() {
-                                Some('✓') => rt = rt.color(GREEN),
-                                Some('✗') => rt = rt.color(RED),
+                                Some('●') => rt = rt.color(GREEN),
+                                Some('×') => rt = rt.color(RED),
                                 Some('⚠') => rt = rt.color(AMBER),
                                 _ => {}
                             }
@@ -1625,6 +1658,74 @@ impl eframe::App for App {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    // ---------------------------------------------------------------- 版本门禁
+    // 这组用例覆盖"白名单 + 显式确认"的实际判定，不依赖 UI 渲染。
+
+    #[test]
+    fn verified_source_needs_no_confirmation() {
+        // 没副本、选中的是白名单版本 → 不弹确认，直接能构建
+        let t = unverified_target(false, Some(patch::VERIFIED_VERSION), None);
+        assert_eq!(t, None);
+        assert!(build_allowed(t.as_deref(), false));
+    }
+
+    #[test]
+    fn unverified_source_needs_confirmation() {
+        let v = "3.6.0.9000";
+        let t = unverified_target(false, Some(v), None);
+        assert_eq!(t.as_deref(), Some(v));
+        assert!(!build_allowed(t.as_deref(), false), "没勾确认不能构建");
+        assert!(build_allowed(t.as_deref(), true), "勾了确认才放行");
+        // 非版本号的来源（portable / custom）同样要确认
+        assert_eq!(
+            unverified_target(false, Some("custom"), None).as_deref(),
+            Some("custom")
+        );
+    }
+
+    /// 回归：勾了确认之后，警告条不能消失。
+    /// `unverified_target` 只回答"源有没有验证过"，与用户是否勾选无关——
+    /// 早先把两者混在一起，勾选后整条提示消失，用户既看不到状态也无法反悔。
+    #[test]
+    fn warning_stays_after_confirm() {
+        let v = "3.6.0.9000";
+        assert_eq!(
+            unverified_target(false, Some(v), None).as_deref(),
+            Some(v),
+            "确认与否不该影响提示条的显示条件"
+        );
+    }
+
+    #[test]
+    fn selection_ignored_once_copy_exists() {
+        // 有副本时，选中的安装不参与构建 → 选到未验证版本也不该弹确认
+        assert_eq!(unverified_target(true, Some("3.6.0.9000"), None), None);
+    }
+
+    #[test]
+    fn rebuild_target_decides_not_selection() {
+        // 有副本 + 发现未验证新版：提示并拦
+        let t = unverified_target(true, Some(patch::VERIFIED_VERSION), Some(("3.6.0.9000", false)));
+        assert_eq!(t.as_deref(), Some("3.6.0.9000"));
+        assert!(!build_allowed(t.as_deref(), false));
+
+        // 有副本 + 新版本身在白名单：不提示（白名单扩张后要能用）
+        assert_eq!(
+            unverified_target(true, None, Some((patch::VERIFIED_VERSION, true))),
+            None
+        );
+        // 有副本 + 没有新版可重建：不提示
+        assert_eq!(unverified_target(true, None, None), None);
+    }
+
+    #[test]
+    fn no_install_falls_through_to_later_error() {
+        // 一个安装都没发现：门禁不该拦，交给后面的 log_no_source 报错
+        let t = unverified_target(false, None, None);
+        assert_eq!(t, None);
+        assert!(build_allowed(t.as_deref(), false));
+    }
 
     /// 回归：两个账号各有一条登录 URL 时，**不能每轮都判定"发现新 URL"**。
     /// 旧实现只维护一个全局 last，两个账号会互相顶掉 → 每 2 秒触发一次，

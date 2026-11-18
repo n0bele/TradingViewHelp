@@ -1136,7 +1136,7 @@ mod tests {
                 .get_value("")
                 .unwrap();
             assert!(cmd.contains("_auth"), "协议命令没指向 tvx _auth：{cmd}");
-            eprintln!("协议命令已指向账号目录 ✓");
+            eprintln!("协议命令已指向账号目录 ●");
         }
         eprintln!("启动 PID {pid}，等 8 秒看是否存活");
         // 深链广播：模拟浏览器回调，实例日志中应出现 second-instance
@@ -1156,7 +1156,7 @@ mod tests {
                 .get_value("")
                 .unwrap();
             assert!(cmd.contains("_auth"), "应用改写后没能纠回协议命令：{cmd}");
-            eprintln!("应用改写后已纠回协议命令 ✓");
+            eprintln!("应用改写后已纠回协议命令 ●");
         }
         std::thread::sleep(std::time::Duration::from_secs(8));
         assert!(is_alive(pid), "进程没能起来");
@@ -1177,7 +1177,7 @@ mod tests {
                 .get_value("")
                 .unwrap();
             let _ = cmd; // 停完后以 maintain 的期望形态为准，这里只记录
-            eprintln!("协议命令已还原 ✓");
+            eprintln!("协议命令已还原 ●");
         }
 
         remove(&p, Lang::Zh).expect("删除档案失败");
