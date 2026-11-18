@@ -18,7 +18,7 @@
 //! 永不建立），`checkForUpdatesAndNotify` 全 bundle 仅定义未调用；
 //! 设置面板的手动检查/下载路径不受影响。
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
@@ -351,8 +351,10 @@ pub const PATCHES: &[Patch] = &[
         // 应用用一个 1 秒超时的 ping（data.tradingview.com/ping）判定在线/离线。
         // 走代理时一次握手就可能超过 1 秒，于是被误判成"离线"（并触发重连弹窗）。
         // 这里把默认超时从 1s 放宽到 10s。
-        old: "he=1e3,",
-        new: "he=1e4,",
+        // 锚点带上 ping 域名：单看 `he=1e3,` 只有 7 个字符，压缩代码里任何一处
+        // 1000ms 常量都可能撞车（"期望 1 处"会因多处命中而误判失配）。
+        old: "\"https://data.tradingview.com/ping\",he=1e3,",
+        new: "\"https://data.tradingview.com/ping\",he=1e4,",
     },
     Patch {
         name: "启动自动更新检查禁用",
@@ -389,6 +391,8 @@ pub enum Status {
     Reverted,
     /// 开关关闭且文件里本来就没有，无需动
     Untouched,
+    /// 锚点没命中（上游版本漂移）：本条跳过，其余补丁继续
+    Failed,
 }
 
 impl Status {
@@ -398,8 +402,120 @@ impl Status {
             Status::AlreadyPatched => "=",
             Status::Reverted => "-",
             Status::Untouched => "·",
+            Status::Failed => "!",
         }
     }
+}
+
+/// apply() 的结果：逐条状态 + 未命中的补丁名。
+/// 单条锚点失配不再整体失败——上游大版本改一次压缩标识符，不至于把全部开关拖死。
+#[derive(Debug, Default)]
+pub struct ApplyReport {
+    pub items: Vec<(&'static str, Status)>,
+    /// 没打上的补丁名（锚点未命中或匹配数不为 1）
+    pub failed: Vec<String>,
+    /// 历史注入脚本升级失配等软告警，不影响最终状态
+    pub warnings: Vec<String>,
+}
+
+impl ApplyReport {
+    fn push(&mut self, item: (&'static str, Status)) {
+        self.items.push(item);
+    }
+}
+
+/// 压缩标识符（webpack 重打包后 `M.j9`、`nk` 这类名字会重排）的兜底锚点。
+/// `{}` 表示"一个标识符"，按出现顺序回填到替换文本里；`from` 是未打补丁的形态，
+/// `to` 是打完的形态。字面锚点优先，只有精确匹配 0 处时才启用。
+struct WildAnchor {
+    patch: &'static str,
+    from: &'static str,
+    to: &'static str,
+}
+
+const WILD_ANCHORS: &[WildAnchor] = &[
+    WildAnchor {
+        patch: "订阅遮罩窗口不再创建",
+        from: "async function {}(e,t){const n=(0,{}.{})().getLastFocusedWindow();",
+        to: "async function {}(e,t){return;const n=(0,{}.{})().getLastFocusedWindow();",
+    },
+    WildAnchor {
+        patch: "showPaywall 变空操作",
+        from: "showPaywall(e,t){return {}(e,t)}",
+        to: "showPaywall(e,t){return Promise.resolve()}",
+    },
+    WildAnchor {
+        patch: "网页内充值窗口不再注入",
+        from: "async requestProFeature(){const e=(0,{}.{})().getLastFocusedWindow();",
+        to: "async requestProFeature(){return;const e=(0,{}.{})().getLastFocusedWindow();",
+    },
+    WildAnchor {
+        patch: "启动自动更新检查禁用",
+        from: "(0,{}.{})()||tp().checkForUpdates()",
+        to: "(0,{}.{})()||!0||tp().checkForUpdates()",
+    },
+];
+
+/// 用 `{}` 通配模式在 `src` 里找全部匹配，返回 (区间, 捕获的标识符)。
+/// 只认 ASCII 标识符字符（`[A-Za-z0-9_$]`），不做任何正则语法解释。
+fn wild_find_all<'a>(src: &'a str, pat: &str) -> Vec<(std::ops::Range<usize>, Vec<&'a str>)> {
+    let parts: Vec<&str> = pat.split("{}").collect();
+    let mut out = Vec::new();
+    if parts.len() == 1 {
+        // 没有通配符，退化成普通查找
+        let mut from = 0;
+        while let Some(rel) = src[from..].find(parts[0]) {
+            let s = from + rel;
+            out.push((s..s + parts[0].len(), Vec::new()));
+            from = s + 1;
+        }
+        return out;
+    }
+    let mut search = 0;
+    while let Some(rel) = src[search..].find(parts[0]) {
+        let start = search + rel;
+        let mut pos = start + parts[0].len();
+        let mut caps = Vec::new();
+        let mut ok = true;
+        for part in parts.iter().skip(1) {
+            let id_start = pos;
+            while pos < src.len() {
+                let c = src[pos..].chars().next().unwrap();
+                if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                    pos += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if pos == id_start {
+                ok = false;
+                break;
+            }
+            caps.push(&src[id_start..pos]);
+            if !src[pos..].starts_with(part) {
+                ok = false;
+                break;
+            }
+            pos += part.len();
+        }
+        if ok {
+            out.push((start..pos, caps));
+        }
+        search = start + 1;
+    }
+    out
+}
+
+/// 把 `to` / `from` 模板里的 `{}` 按捕获顺序填回。
+fn wild_expand(pat: &str, caps: &[&str]) -> String {
+    let mut out = String::new();
+    for (i, part) in pat.split("{}").enumerate() {
+        if i > 0 {
+            out.push_str(caps.get(i - 1).copied().unwrap_or(""));
+        }
+        out.push_str(part);
+    }
+    out
 }
 
 /// 定位「断线自动恢复」注入段的字节区间：从 `DOM_READY_HEAD` 到 `OLD_RECOVER_ANCHOR`。
@@ -427,13 +543,15 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
 /// - 开关开 + 已打过 → 不动（AlreadyPatched）
 /// - 开关关 + 已打过 → 撤回 new→old（Reverted）
 /// - 开关关 + 未打过  → 不动（Untouched）
-pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status)>> {
+pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
     let bytes = fs::read(index_js).with_context(|| format!("读取 {}", index_js.display()))?;
     let mut src = String::from_utf8(bytes)
         .map_err(|_| anyhow::anyhow!("index.js 不是合法 UTF-8，拒绝改写"))?;
 
-    let mut report = Vec::new();
-    let mut failures = Vec::new();
+    let mut report = ApplyReport::default();
+    // 历史注入脚本升级失配只算告警：后面的常规流程仍会给这条补丁一个准确状态，
+    // 不能因为一段旧文本没对上就整批失败。
+    let mut warnings: Vec<String> = Vec::new();
 
     // 0) 历史注入文本先就地升级：已装好的副本里还是旧脚本时，新版锚点是对不上的。
     //    按当前开关决定升级成新脚本（开）还是撤回成原始锚点（关）。
@@ -449,7 +567,7 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
                 let target = if p.group.enabled(flags) { p.new } else { p.old };
                 src = src.replacen(legacy, target, 1);
             }
-            n => failures.push(format!(
+            n => warnings.push(format!(
                 "{}：旧版注入脚本期望 1 处匹配，实际 {n} 处",
                 p.name
             )),
@@ -471,7 +589,7 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
                     }
                 }
             }
-            n => failures.push(format!(
+            n => warnings.push(format!(
                 "{}：handleDomReady 段期望 1 处，实际 {n} 处",
                 p.name
             )),
@@ -502,10 +620,32 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
                         src = src.replacen(p.new, p.old, 1);
                         report.push((p.name, Status::Reverted));
                     }
-                    n => failures.push(format!(
-                        "{}：撤回时期望 new 1 处匹配，实际 {n} 处",
-                        p.name
-                    )),
+                    n => {
+                        report.push((p.name, Status::Failed));
+                        report.failed.push(format!(
+                            "{}：撤回时期望 new 1 处匹配，实际 {n} 处",
+                            p.name
+                        ));
+                    }
+                }
+            } else if let Some(w) = WILD_ANCHORS.iter().find(|w| w.patch == p.name) {
+                // 之前可能是用通配锚点打的（压缩标识符已经变了），精确 new 对不上；
+                // 但文件里仍是"已打补丁"的形态，按 to 模式定位后回填 from。
+                match wild_find_all(&src, w.to).as_slice() {
+                    [(range, caps)] => {
+                        let back = wild_expand(w.from, caps);
+                        src.replace_range(range.clone(), &back);
+                        report.push((p.name, Status::Reverted));
+                    }
+                    [] => report.push((p.name, Status::Untouched)),
+                    many => {
+                        report.push((p.name, Status::Failed));
+                        report.failed.push(format!(
+                            "{}：撤回时通配锚点命中 {} 处",
+                            p.name,
+                            many.len()
+                        ));
+                    }
                 }
             } else {
                 report.push((p.name, Status::Untouched));
@@ -522,22 +662,58 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<Vec<(&'static str, Status
                 src = src.replacen(p.old, p.new, 1);
                 report.push((p.name, Status::Applied));
             }
-            n => failures.push(format!("{}：期望 1 处匹配，实际 {n} 处", p.name)),
+            0 => {
+                // 字面锚点没命中：多半只是压缩标识符重排（`M.j9` → `M.xQ` 这种），
+                // 用 `{}` 通配再定位一次。
+                let Some(w) = WILD_ANCHORS.iter().find(|w| w.patch == p.name) else {
+                    report.push((p.name, Status::Failed));
+                    report.failed.push(format!(
+                        "{}：锚点未命中（上游代码结构已变，需要更新补丁集）",
+                        p.name
+                    ));
+                    continue;
+                };
+                match wild_find_all(&src, w.from).as_slice() {
+                    [(range, caps)] => {
+                        let to = wild_expand(w.to, caps);
+                        src.replace_range(range.clone(), &to);
+                        report.push((p.name, Status::Applied));
+                    }
+                    [] => {
+                        // 也可能已经是通配锚点打过的形态
+                        if wild_find_all(&src, w.to).len() == 1 {
+                            report.push((p.name, Status::AlreadyPatched));
+                        } else {
+                            report.push((p.name, Status::Failed));
+                            report.failed.push(format!(
+                                "{}：字面与通配锚点都未命中（上游代码结构可能已变）",
+                                p.name
+                            ));
+                        }
+                    }
+                    many => {
+                        report.push((p.name, Status::Failed));
+                        report.failed.push(format!(
+                            "{}：通配锚点命中 {} 处，无法确定替换位置",
+                            p.name,
+                            many.len()
+                        ));
+                    }
+                }
+            }
+            n => {
+                report.push((p.name, Status::Failed));
+                report.failed
+                    .push(format!("{}：期望 1 处匹配，实际 {n} 处", p.name));
+            }
         }
     }
 
-    if !failures.is_empty() {
-        bail!(
-            "补丁未应用（{} 处锚点未命中）。补丁锚点按版本 {} 的 index.js 提取，\
-             其他版本的字面结构可能已变化——请更新 TVHelper 的补丁集或手动核对：\n  {}",
-            failures.len(),
-            VERIFIED_VERSION,
-            failures.join("\n  ")
-        );
-    }
-
+    // 成功一条就落一条：单条失配只影响该功能，不再把整批补丁和副本一起拖死。
+    // 调用方据 ApplyReport::failed 提示"哪几项没生效、建议重建副本"。
     fs::write(index_js, src.as_bytes())
         .with_context(|| format!("写回 {}", index_js.display()))?;
+    report.warnings = warnings;
     Ok(report)
 }
 
@@ -625,8 +801,11 @@ pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<()> {
 pub fn is_patched(index_js: &Path, flags: &Flags) -> bool {
     match fs::read_to_string(index_js) {
         Ok(s) => PATCHES.iter().all(|p| {
-            let has_new = s.contains(p.new);
-            let has_old = s.contains(p.old);
+            // 精确锚点之外，再看通配锚点：上游只重排压缩标识符时，new/old 字面都不在
+            // 文件里，但补丁其实打得是对的，不能误报"补丁异常"。
+            let wild = WILD_ANCHORS.iter().find(|w| w.patch == p.name);
+            let has_new = s.contains(p.new) || wild.is_some_and(|w| wild_find_all(&s, w.to).len() == 1);
+            let has_old = s.contains(p.old) || wild.is_some_and(|w| wild_find_all(&s, w.from).len() == 1);
             if p.group.enabled(flags) {
                 has_new && !has_old
             } else {
@@ -803,7 +982,7 @@ mod tests {
         // 幂等：再跑一次不应改动文件
         let before = fs::read_to_string(&f).unwrap();
         let report = apply(&f, &Flags::default()).unwrap();
-        assert!(report.iter().all(|(_, st)| matches!(
+        assert!(report.items.iter().all(|(_, st)| matches!(
             st,
             Status::AlreadyPatched | Status::Untouched
         )));
@@ -940,6 +1119,7 @@ mod tests {
         write_pristine(&pristine);
         let report = apply(&f, &Flags::default()).unwrap();
         assert!(report
+            .items
             .iter()
             .all(|(_, st)| *st == Status::Applied || *st == Status::AlreadyPatched));
         assert!(read().contains(ads.new));
@@ -966,7 +1146,7 @@ mod tests {
             .collect();
         write_pristine(&read()); // 当前是已打状态，先按现状
         let report = apply(&f, &all_off).unwrap();
-        assert!(report.iter().all(|(_, st)| matches!(
+        assert!(report.items.iter().all(|(_, st)| matches!(
             st,
             Status::Reverted | Status::Untouched | Status::AlreadyPatched
         )));
@@ -1001,7 +1181,7 @@ mod tests {
         // 4) 幂等：同配置重跑应全部 AlreadyPatched/Untouched 且文件不变
         let before = read();
         let report = apply(&f, &only_charts).unwrap();
-        assert!(report.iter().all(|(_, st)| matches!(
+        assert!(report.items.iter().all(|(_, st)| matches!(
             st,
             Status::AlreadyPatched | Status::Untouched
         )));
@@ -1121,5 +1301,91 @@ mod tests {
         // 邮件可按报警覆盖收发件人
         assert!(ALERTS_MAIN_JS.contains("emailFrom") && ALERTS_MAIN_JS.contains("emailTo"));
         assert!(ALERTS_MAIN_JS.contains("if (p.body) return p.body"), "邮件正文优先用模板渲染结果");
+    }
+
+    #[test]
+    fn wild_anchor_tolerates_renamed_identifiers() {
+        // 压缩标识符随 webpack 重打包重排：通配锚点要能重新定位并保留新名字
+        let src = "async function xQ(e,t){const n=(0,Ab.cD)().getLastFocusedWindow();";
+        let pat = "async function {}(e,t){const n=(0,{}.{})().getLastFocusedWindow();";
+        let hits = wild_find_all(src, pat);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1, vec!["xQ", "Ab", "cD"]);
+        let to = wild_expand(
+            "async function {}(e,t){return;const n=(0,{}.{})().getLastFocusedWindow();",
+            &hits[0].1,
+        );
+        assert_eq!(
+            to,
+            "async function xQ(e,t){return;const n=(0,Ab.cD)().getLastFocusedWindow();"
+        );
+        // 通配只吃标识符字符，不能跨过标点乱匹配
+        assert!(wild_find_all("async function f(){const n=0}", pat).is_empty());
+    }
+
+    #[test]
+    fn apply_degrades_per_patch_and_survives_renames() {
+        let dir = std::env::temp_dir().join("tvx-patch-degrade-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let idx = dir.join("index.js");
+
+        // 用所有补丁的 old 拼出一份"原始" index.js
+        let pristine: String = PATCHES.iter().map(|p| p.old).collect::<Vec<_>>().join("\n");
+        fs::write(&idx, &pristine).unwrap();
+
+        let on = Flags::default();
+        let first = apply(&idx, &on).unwrap();
+        assert!(first.failed.is_empty(), "全开时不应有失败：{:?}", first.failed);
+        assert!(first.items.iter().all(|(_, s)| *s == Status::Applied));
+
+        // 幂等：再跑一次全部是"已打过"
+        let second = apply(&idx, &on).unwrap();
+        assert!(second
+            .items
+            .iter()
+            .all(|(_, s)| *s == Status::AlreadyPatched));
+
+        // 撤回：开关全关后逐条还原（Auth 恒开，跳过它）
+        let off = Flags {
+            ads_block: false,
+            charts_unlock: false,
+            study_on_study: false,
+            silence_paywalls: false,
+            no_auto_update: false,
+            auto_recover: false,
+            alerts: false,
+        };
+        let third = apply(&idx, &off).unwrap();
+        assert!(third.failed.is_empty(), "撤回不应失败：{:?}", third.failed);
+
+        // 模拟上游重打包：压缩标识符全改名，字面锚点失配，通配锚点应接住
+        let drifted = pristine
+            .replace("nk(e,t)", "xQ(e,t)")
+            .replace("(0,Pe.Qh)()", "(0,Zz.Yy)()")
+            .replace("(0,M.j9)()", "(0,Wq.r8)()");
+        assert!(drifted.contains("xQ(e,t)"));
+        fs::write(&idx, &drifted).unwrap();
+        let fourth = apply(&idx, &on).unwrap();
+        assert!(
+            fourth.failed.is_empty(),
+            "只改压缩标识符时不应报失配：{:?}",
+            fourth.failed
+        );
+        let text = fs::read_to_string(&idx).unwrap();
+        assert!(text.contains("async function xQ(e,t){return;"));
+        assert!(text.contains("showPaywall(e,t){return Promise.resolve()}"));
+        assert!(text.contains("(0,Wq.r8)()||!0||tp().checkForUpdates()"));
+
+        // 真·结构变化（锚点彻底不存在）只让该条失败，其余照打
+        let broken = pristine.replace("showPaywall(e,t){return nk(e,t)}", "showPaywallV2(){}");
+        fs::write(&idx, &broken).unwrap();
+        let fifth = apply(&idx, &on).unwrap();
+        assert!(fifth.failed.iter().any(|f| f.contains("showPaywall")));
+        assert!(!fifth.failed.iter().any(|f| f.contains("自动更新")));
+        let text = fs::read_to_string(&idx).unwrap();
+        assert!(text.contains("(0,M.j9)()||!0||tp().checkForUpdates()"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

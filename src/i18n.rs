@@ -301,6 +301,119 @@ impl Lang {
         self.pick(format!("启动失败：{e}"), format!("Launch failed: {e}"))
     }
 
+    /// 批量启动时的单条进度
+    pub fn log_launching(&self, name: &str, pid: u32) -> String {
+        self.pick(
+            format!("… 启动「{name}」 PID {pid}"),
+            format!("… launching \"{name}\" (PID {pid})"),
+        )
+    }
+
+    pub fn log_launch_one_failed(&self, name: &str, e: &str) -> String {
+        self.pick(
+            format!("✗ 「{name}」{e}"),
+            format!("✗ \"{name}\": {e}"),
+        )
+    }
+
+    /// 同时运行的实例数到顶：每个实例是一整棵 Electron 进程树，内存不是无限的
+    pub fn log_running_limit(&self, running: usize, max: usize) -> String {
+        self.pick(
+            format!("已在运行 {running} 个实例（上限 {max}）；先停掉不用的账号再启动"),
+            format!(
+                "Already running {running} instance(s) (limit {max}); stop an unused account first"
+            ),
+        )
+    }
+
+    /// 批量启动被上限截断时：只启动额度内的账号
+    pub fn log_launch_budget(&self, launching: usize, running: usize, max: usize) -> String {
+        self.pick(
+            format!("已运行 {running} 个实例（上限 {max}），本次只启动 {launching} 个"),
+            format!("{running} instance(s) already running (limit {max}); launching {launching}"),
+        )
+    }
+
+    /// 改名 / 复制：按钮、输入提示与日志
+    pub fn btn_rename(&self) -> String {
+        self.pick("改名".into(), "Rename".into())
+    }
+
+    pub fn btn_duplicate(&self) -> String {
+        self.pick("复制".into(), "Duplicate".into())
+    }
+
+    pub fn e_rename_hint(&self) -> String {
+        self.pick(
+            "新名字（回车确认）".into(),
+            "New name (press Enter)".into(),
+        )
+    }
+
+    pub fn e_duplicate_hint(&self) -> String {
+        self.pick(
+            "副本名字（会复制登录态，不能与现有账号重名）".into(),
+            "Copy name (login state is copied; must be unique)".into(),
+        )
+    }
+
+    /// 复制账号时预填的名字后缀
+    pub fn e_copy_suffix(&self) -> String {
+        self.pick("-副本".into(), "-copy".into())
+    }
+
+    pub fn log_renamed(&self, old: &str, new: &str) -> String {
+        self.pick(
+            format!("「{old}」已改名为「{new}」"),
+            format!("\"{old}\" renamed to \"{new}\""),
+        )
+    }
+
+    pub fn log_rename_failed(&self, e: &str) -> String {
+        self.pick(format!("改名失败：{e}"), format!("Rename failed: {e}"))
+    }
+
+    pub fn log_duplicating(&self, from: &str, to: &str) -> String {
+        self.pick(
+            format!("正在复制「{from}」→「{to}」（账号目录较大时需等一会）…"),
+            format!("Copying \"{from}\" → \"{to}\" (may take a while for large profiles)…"),
+        )
+    }
+
+    pub fn log_duplicated(&self, name: &str) -> String {
+        self.pick(
+            format!("已复制出「{name}」"),
+            format!("Duplicated as \"{name}\""),
+        )
+    }
+
+    pub fn log_duplicate_failed(&self, e: &str) -> String {
+        self.pick(format!("复制失败：{e}"), format!("Duplicate failed: {e}"))
+    }
+
+    /// 登录页打开方式（应用内标签页 / 无痕窗口 / 默认浏览器）
+    pub fn log_login_in_app(&self) -> String {
+        self.pick(
+            "已在应用内标签页打开登录页（不需要外部浏览器）".into(),
+            "Login page opened in an in-app tab (no external browser needed)".into(),
+        )
+    }
+
+    pub fn log_login_private(&self) -> String {
+        self.pick(
+            "已在无痕窗口打开登录页（不受你浏览器里已有账号影响）".into(),
+            "Login page opened in a private window (unaffected by accounts already signed in)"
+                .into(),
+        )
+    }
+
+    pub fn log_login_default_browser(&self) -> String {
+        self.pick(
+            "已用默认浏览器打开登录页（未找到 Chrome/Edge）".into(),
+            "Login page opened in your default browser (Chrome/Edge not found)".into(),
+        )
+    }
+
     pub fn log_stopped(&self, pid: u32) -> String {
         self.pick(format!("已停止 PID {pid}"), format!("Stopped PID {pid}"))
     }
@@ -410,6 +523,22 @@ impl Lang {
                 .into(),
             "Managed copy upgraded to the current patch set (disconnect dialogs now auto-recover); running instances take effect after restart"
                 .into(),
+        )
+    }
+
+    /// 部分补丁锚点未命中：单条失效不阻塞其余功能
+    pub fn log_patch_partial(&self, failed: &[String]) -> String {
+        self.pick(
+            format!(
+                "⚠ 有 {} 项补丁未生效（上游代码结构可能已变）：{}。其余功能正常；可在关闭 TradingView 后重建副本",
+                failed.len(),
+                failed.join("、")
+            ),
+            format!(
+                "⚠ {} patch(es) did not apply (upstream code may have changed): {}. Other features are unaffected; rebuild the copy after closing TradingView",
+                failed.len(),
+                failed.join(", ")
+            ),
         )
     }
 

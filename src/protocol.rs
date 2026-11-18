@@ -81,13 +81,11 @@ pub fn set_target(_tv_exe: &Path, _profile_dir: Option<&Path>) -> anyhow::Result
 
 #[cfg(target_os = "macos")]
 pub fn set_target(_exe: &Path, _profile_dir: Option<&Path>) -> anyhow::Result<()> {
-    // macOS 的 URL scheme 绑定在 App bundle 的 Info.plist 上，LaunchServices 对同一个
-    // scheme 只有一个默认处理程序，也不能携带命令行参数；而且 GUI App 收到的 URL 是
-    // Apple Event，不是 argv，所以"写个 shell 脚本转发"行不通。
-    //
-    // 要真正按账号路由，必须走「每个账号一份 .app 副本（改 CFBundleIdentifier）+
-    // 登录前把默认 handler 指向该副本」的方案，这会改变 macOS 上的目录布局，
-    // 尚未实现（见 docs/macos-routing.md 的计划）。
+    // macOS 的 URL scheme 绑在 App bundle 的 Info.plist 上，LaunchServices 对同一个
+    // scheme 只认一个默认处理程序，且 GUI App 收到的是 Apple Event 而不是 argv。
+    // 所以这里保持 no-op：按账号路由由 macos_app::ensure_profile_app 完成——
+    // 每个账号一份改过 CFBundleIdentifier 的 .app 副本，登录前把默认 handler 指过去。
+    // 不要在这里全局改 handler，那会把其他账号正在等的回调抢走。
     Ok(())
 }
 

@@ -10,6 +10,7 @@ use crate::{asar, patch};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------- 数据模型
@@ -228,11 +229,10 @@ pub fn load_config() -> Config {
         .unwrap_or_default()
 }
 
-pub fn save_config(cfg: &Config) {
-    let _ = fs::create_dir_all(tvx_root());
-    if let Ok(s) = serde_json::to_string_pretty(cfg) {
-        let _ = fs::write(config_path(), s);
-    }
+pub fn save_config(cfg: &Config) -> std::io::Result<()> {
+    let s = serde_json::to_string_pretty(cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_atomic(&config_path(), s.as_bytes())
 }
 
 // ---------------------------------------------------------------- 目录约定
@@ -245,6 +245,46 @@ pub fn tvx_root() -> PathBuf {
 
 pub fn managed_root() -> PathBuf {
     tvx_root().join("apps")
+}
+
+/// 原子写：先写同目录临时文件再 rename。
+/// 直接 `fs::write` 覆盖时，断电/崩溃会留下半截 JSON —— 配置或 PID 直接损坏，
+/// 而这两类文件恰好决定"开关是否生效"和"实例是否在跑"。
+/// 目标被短暂占用（杀软扫描、Windows 索引）时重试几次。
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    fs::write(&tmp, bytes)?;
+    let mut last = None;
+    for attempt in 0..3u64 {
+        match fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(80 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    let _ = fs::remove_file(&tmp);
+    Err(last.expect("至少失败过一次"))
+}
+
+/// GUI 没有控制台：影响功能但不该弹窗的写入/清理失败，记一行到 ~/.tvx/error.log。
+/// 不记就没有任何线索——用户只会看到"开关下次启动又回去了"。
+pub fn log_error(context: &str, err: &dyn std::fmt::Display) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{ts}] {context}: {err}\n");
+    let path = tvx_root().join("error.log");
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 pub fn dest_for(src: &Install) -> PathBuf {
@@ -267,9 +307,8 @@ pub fn active_app() -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
-pub fn set_active_app(version: &str) {
-    let _ = fs::create_dir_all(tvx_root());
-    let _ = fs::write(active_app_path(), format!("{version}\n"));
+pub fn set_active_app(version: &str) -> std::io::Result<()> {
+    write_atomic(&active_app_path(), format!("{version}\n").as_bytes())
 }
 
 /// 版本号按**数字段**比较：3.10.1 > 3.9.7（按字符串比会反过来）。
@@ -458,11 +497,16 @@ pub fn load_managed() -> Option<Managed> {
     // 2) 没有锁定记录、或锁定的目录已被删：取版本号最大的一份，并锁定
     found.sort_by(|a, b| ver_key(&a.version).cmp(&ver_key(&b.version)));
     let best = found.pop()?;
-    set_active_app(&best.version);
+    if let Err(e) = set_active_app(&best.version) {
+        log_error("记录活跃副本版本 active-app", &e);
+    }
     Some(best)
 }
 
-/// 复制 → 解包 asar → 按配置打补丁（macOS 再重签名）。失败即整体放弃。
+/// 复制 → 解包 asar → 按配置打补丁（macOS 再重签名）。
+///
+/// 先在旁边的暂存目录里完整构建，成功后才替换正式目录：复制几百 MB 的中途失败、
+/// 或补丁写回失败，都只丢暂存目录，用户已有的副本原封不动。
 pub fn build(
     src: &Install,
     dest: &Path,
@@ -474,16 +518,87 @@ pub fn build(
         bail!(lang.b_incomplete(&src.root.display().to_string()));
     }
 
-    if dest.exists() {
-        log(lang.b_cleanup(&dest.display().to_string()));
-        fs::remove_dir_all(dest).with_context(|| lang.b_delete_failed(&dest.display().to_string()))?;
+    let staging = staging_dir(dest);
+    // 上次中断留下的暂存目录先清掉（可能被占用；删不掉就让下面的构建自己报错）
+    let _ = remove_dir_retry(&staging);
+
+    if let Err(e) = build_into(src, &staging, flags, lang, log) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
     }
 
-    // macOS 必须保留 .app 外壳，否则 Info.plist / 签名校验会出问题
+    if dest.exists() {
+        log(lang.b_cleanup(&dest.display().to_string()));
+        // 旧副本可能正被运行中的实例占着（Windows 会锁 exe），重试几次再放弃
+        remove_dir_retry(dest)
+            .with_context(|| lang.b_delete_failed(&dest.display().to_string()))?;
+    }
+    fs::rename(&staging, dest).with_context(|| {
+        format!(
+            "把构建好的副本从 {} 移到 {} 失败",
+            staging.display(),
+            dest.display()
+        )
+    })?;
+
+    Ok(Managed {
+        dir: dest.to_path_buf(),
+        app: app_dir_in(dest),
+        version: src.version.clone(),
+    })
+}
+
+/// 托管副本里的可执行根：macOS 是 .app 外壳，其他平台就是目录本身。
+fn app_dir_in(dest: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
-    let app = dest.join("TradingView.app");
+    {
+        dest.join("TradingView.app")
+    }
     #[cfg(not(target_os = "macos"))]
-    let app = dest.to_path_buf();
+    {
+        dest.to_path_buf()
+    }
+}
+
+/// 与 dest 同级的隐藏暂存目录（同一分区，最后的 rename 才是原子的）。
+fn staging_dir(dest: &Path) -> PathBuf {
+    let name = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "copy".into());
+    dest.with_file_name(format!(".{name}.building"))
+}
+
+/// 删除目录；Windows 上遇到实例占用 / 杀软扫描时重试几次，而不是一次失败就放弃。
+fn remove_dir_retry(dir: &Path) -> std::io::Result<()> {
+    use std::time::Duration;
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..4u64 {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if !dir.exists() {
+                    return Ok(());
+                }
+                last = Some(e);
+                if attempt < 3 {
+                    std::thread::sleep(Duration::from_millis(250 * (attempt + 1)));
+                }
+            }
+        }
+    }
+    Err(last.expect("至少失败过一次"))
+}
+
+fn build_into(
+    src: &Install,
+    dest: &Path,
+    flags: &patch::Flags,
+    lang: Lang,
+    log: &mut dyn FnMut(String),
+) -> Result<()> {
+    // macOS 必须保留 .app 外壳，否则 Info.plist / 签名校验会出问题
+    let app = app_dir_in(dest);
 
     log(lang.b_copying(
         &src.root.display().to_string(),
@@ -518,8 +633,10 @@ pub fn build(
     }
 
     log(lang.b_patching());
-    for (name, st) in patch::apply(&app_dir.join("index.js"), flags)? {
-        // + 打上 / = 已打过 / - 撤回 / · 未启用
+    // 补丁逐条应用：单条锚点失配只跳过该功能，不再让整次构建失败
+    let applied = patch::apply(&app_dir.join("index.js"), flags)?;
+    for &(name, st) in &applied.items {
+        // + 打上 / = 已打过 / - 撤回 / · 未启用 / ! 未命中
         let shown: &str = if lang == Lang::En {
             patch::name_en(name)
         } else {
@@ -527,16 +644,18 @@ pub fn build(
         };
         log(format!("  [{}] {shown}", st.mark()));
     }
+    for w in &applied.warnings {
+        log(format!("  ! {w}"));
+    }
+    if !applied.failed.is_empty() {
+        log(lang.log_patch_partial(&applied.failed));
+    }
     // 报警功能是「文件 + 一处 require」，不只改 index.js，所以补丁之后还要落资源
     patch::install_assets(&app_dir, flags)?;
 
     resign_if_needed(&app, lang, log)?;
 
-    Ok(Managed {
-        dir: dest.to_path_buf(),
-        app,
-        version: src.version.clone(),
-    })
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

@@ -2,7 +2,7 @@
 //!
 //! 所有操作先收集成一个 `Act`，等面板画完再统一执行，
 //! 这样面板闭包里不需要可变借用整份 self，省掉一堆借用检查的坑。
-//! 文案全部走 `i18n`（简中 / 繁中 / English），切换语言即时生效。
+//! 文案全部走 `i18n`（中文 / English），切换语言即时生效。
 
 use crate::i18n::Lang;
 use crate::install::{self, Config, Install, Managed};
@@ -41,13 +41,16 @@ pub fn reapply_headless() {
     };
     match patch::apply(&m.index_js(), &cfg.flags()) {
         Ok(report) => {
-            for (name, st) in report {
+            for &(name, st) in &report.items {
                 let shown: &str = if lang == Lang::En {
                     patch::name_en(name)
                 } else {
                     name
                 };
                 println!("[{}] {shown}", st.mark());
+            }
+            if !report.failed.is_empty() {
+                eprintln!("{}", lang.log_patch_partial(&report.failed));
             }
             // 报警功能的资源文件（引擎 / 主进程模块 / preload 桥）随开关一起落盘或清除
             if let Some(dir) = m.index_js().parent() {
@@ -319,12 +322,13 @@ fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<String> {
     if let Some(c) = ctx {
         profiles::spawn_handoff_watcher(c.clone());
     }
+    let lang = crate::install::load_config().lang;
     Some(if opened_in_app {
-        "已在应用内标签页打开登录页（不需要外部浏览器）".to_string()
+        lang.log_login_in_app()
     } else if crate::browser::open_private(url) {
-        "已在无痕窗口打开登录页（不受你浏览器里已有账号影响）".to_string()
+        lang.log_login_private()
     } else {
-        "已用默认浏览器打开登录页（未找到 Chrome/Edge）".to_string()
+        lang.log_login_default_browser()
     })
 }
 
@@ -406,12 +410,27 @@ fn spawn_scan_thread(ctx: egui::Context, shared: Arc<Mutex<Shared>>) {
     });
 }
 
+/// 账号卡片上的内联输入（改名 / 复制）：`source` 是原账号名
+struct NameEdit {
+    source: String,
+    kind: EditKind,
+    text: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Rename,
+    Duplicate,
+}
+
 enum Act {
     Launch(String),
     Stop(u32),
     LaunchAll,
     StopAll,
     Delete(String),
+    Rename(String, String),
+    Duplicate(String, String),
     SubmitAdd,
     ReapplyPatches,
     /// 按指定的安装重建托管副本（客户端升级后副本还停在旧版本时用）
@@ -437,6 +456,8 @@ pub struct App {
     add_error: Option<String>,
 
     pending_delete: Option<String>,
+    /// 改名 / 复制的内联输入状态
+    name_edit: Option<NameEdit>,
 
     /// 托盘图标（Windows/macOS 才有；Linux 为 None）
     tray: Option<crate::tray::Tray>,
@@ -467,6 +488,7 @@ impl App {
             new_name: String::new(),
             add_error: None,
             pending_delete: None,
+            name_edit: None,
             tray: None,
             tray_attempts: 0,
             quitting: false,
@@ -553,7 +575,7 @@ impl App {
                 let dest = install::dest_for(&inst);
                 match install::build(&inst, &dest, &flags, lang, &mut push) {
                     Ok(m) => {
-                        install::set_active_app(&m.version);
+                        let _ = install::set_active_app(&m.version);
                         push(lang.log_built(&m.dir.display().to_string()))
                     }
                     Err(e) => {
@@ -600,6 +622,12 @@ impl App {
                     self.log(lang.log_need_copy());
                     return;
                 };
+                // 上限按"在跑的实例数"算：每个实例都是一整棵进程树
+                let running = profiles::running_count();
+                if running >= profiles::MAX_RUNNING {
+                    self.log(lang.log_running_limit(running, profiles::MAX_RUNNING));
+                    return;
+                }
                 if let Some(p) = self.profiles.iter().find(|p| p.name == name).cloned() {
                     match profiles::launch(&m, &p, lang) {
                         Ok(pid) => {
@@ -644,7 +672,13 @@ impl App {
                 let Some(m) = self.managed.clone() else {
                     return;
                 };
-                let todo: Vec<Profile> = self
+                let running = profiles::running_count();
+                let budget = profiles::MAX_RUNNING.saturating_sub(running);
+                if budget == 0 {
+                    self.log(lang.log_running_limit(running, profiles::MAX_RUNNING));
+                    return;
+                }
+                let mut todo: Vec<Profile> = self
                     .profiles
                     .iter()
                     .filter(|p| self.status.get(&p.name).copied().flatten().is_none())
@@ -652,6 +686,10 @@ impl App {
                     .collect();
                 if todo.is_empty() {
                     return;
+                }
+                if todo.len() > budget {
+                    todo.truncate(budget);
+                    self.log(lang.log_launch_budget(todo.len(), running, profiles::MAX_RUNNING));
                 }
                 // 错峰启动：逐个间隔 STAGGER_SECS 秒，避免多个实例在同一瞬间一起建连
                 // （服务端看到的是同一账号/同一出口的建连风暴，更容易被判超限）。
@@ -669,9 +707,11 @@ impl App {
                             match profiles::launch(&m, p, lang) {
                                 Ok(pid) => {
                                     started.push(p.clone());
-                                    push(format!("… 启动「{}」 PID {pid}", p.name));
+                                    push(lang.log_launching(&p.name, pid));
                                 }
-                                Err(e) => push(format!("✗ 「{}」{e:#}", p.name)),
+                                Err(e) => {
+                                    push(lang.log_launch_one_failed(&p.name, &format!("{e:#}")))
+                                }
                             }
                         }
                         let n = started.len();
@@ -715,6 +755,42 @@ impl App {
                 }
                 self.wake_scanner();
             }
+            Act::Rename(from, to) => {
+                if let Some(p) = self.profiles.iter().find(|p| p.name == from).cloned() {
+                    match profiles::rename(&p, &to, lang) {
+                        Ok(np) => {
+                            self.log(lang.log_renamed(&p.name, &np.name));
+                            // 运行态按名字索引，改名后要跟着搬，否则卡片状态会错位
+                            if let Some(st) = self.status.remove(&p.name) {
+                                self.status.insert(np.name.clone(), st);
+                            }
+                            self.launching.remove(&p.name);
+                        }
+                        Err(e) => self.log(lang.log_rename_failed(&format!("{e:#}"))),
+                    }
+                }
+                self.wake_scanner();
+            }
+            Act::Duplicate(from, to) => {
+                let Some(p) = self.profiles.iter().find(|p| p.name == from).cloned() else {
+                    return;
+                };
+                // 账号目录动辄几百 MB，放后台复制，别冻住界面
+                run_job(
+                    ctx,
+                    self.shared.clone(),
+                    false,
+                    Box::new(move |push| {
+                        push(lang.log_duplicating(&p.name, &to));
+                        match profiles::duplicate(&p, &to, lang) {
+                            Ok(np) => push(lang.log_duplicated(&np.name)),
+                            Err(e) => push(lang.log_duplicate_failed(&format!("{e:#}"))),
+                        }
+                        Ok(String::new())
+                    }),
+                );
+                self.wake_scanner();
+            }
             Act::ReapplyPatches => {
                 let Some(m) = self.managed.clone() else {
                     return;
@@ -736,13 +812,16 @@ impl App {
                             flags.silence_paywalls,
                             flags.no_auto_update,
                         ));
-                        for (name, st) in report {
+                        for &(name, st) in &report.items {
                             let shown: &str = if lang == Lang::En {
                                 patch::name_en(name)
                             } else {
                                 name
                             };
                             push(format!("  [{}] {shown}", st.mark()));
+                        }
+                        if !report.failed.is_empty() {
+                            push(lang.log_patch_partial(&report.failed));
                         }
                         Ok(lang.log_reapplied())
                     }),
@@ -765,7 +844,7 @@ impl App {
                         push(lang.log_rebuild_start(&inst.version));
                         let m = install::build(&inst, &dest, &flags, lang, &mut *push)?;
                         // 锁定新版本：多版本目录共存时，后续启动都走这一份
-                        install::set_active_app(&m.version);
+                        let _ = install::set_active_app(&m.version);
                         Ok(lang.log_rebuilt(&m.version, &old))
                     }),
                 );
@@ -798,13 +877,16 @@ impl eframe::App for App {
                         Box::new(move |push| {
                             let report = patch::apply(&m.index_js(), &flags)?;
                             push(lang.log_patch_upgraded());
-                            for (name, st) in report {
+                            for &(name, st) in &report.items {
                                 let shown: &str = if lang == Lang::En {
                                     patch::name_en(name)
                                 } else {
                                     name
                                 };
                                 push(format!("  [{}] {shown}", st.mark()));
+                            }
+                            if !report.failed.is_empty() {
+                                push(lang.log_patch_partial(&report.failed));
                             }
                             Ok(lang.log_reapplied())
                         }),
@@ -1104,7 +1186,10 @@ impl eframe::App for App {
                     toggled = true;
                 }
                 if toggled {
-                    install::save_config(&self.cfg.clone());
+                    // 配置写失败=开关下次启动会"自己变回去"，必须留下痕迹
+                    if let Err(e) = install::save_config(&self.cfg) {
+                        install::log_error("保存功能开关 config.json", &e);
+                    }
                     act = Some(Act::ReapplyPatches);
                 }
             });
@@ -1318,6 +1403,20 @@ impl eframe::App for App {
                                             } else if ui.button(t.delete).clicked() {
                                                 self.pending_delete = Some(name.clone());
                                             }
+                                            if ui.button(self.cfg.lang.btn_rename()).clicked() {
+                                                self.name_edit = Some(NameEdit {
+                                                    source: name.clone(),
+                                                    kind: EditKind::Rename,
+                                                    text: name.clone(),
+                                                });
+                                            }
+                                            if ui.button(self.cfg.lang.btn_duplicate()).clicked() {
+                                                self.name_edit = Some(NameEdit {
+                                                    source: name.clone(),
+                                                    kind: EditKind::Duplicate,
+                                                    text: format!("{}{}", name, self.cfg.lang.e_copy_suffix()),
+                                                });
+                                            }
                                             if ui.button(t.dir).clicked() {
                                                 open_path(dir);
                                             }
@@ -1343,6 +1442,56 @@ impl eframe::App for App {
                                         },
                                     );
                                 });
+                                // 改名 / 复制的内联输入：和删除确认一样贴在卡片上，不用弹窗
+                                if let Some(kind) = self
+                                    .name_edit
+                                    .as_ref()
+                                    .filter(|e| e.source == *name)
+                                    .map(|e| e.kind)
+                                {
+                                    let mut text = self
+                                        .name_edit
+                                        .as_ref()
+                                        .map(|e| e.text.clone())
+                                        .unwrap_or_default();
+                                    let mut go = false;
+                                    let mut cancel = false;
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(18.0);
+                                        let hint = match kind {
+                                            EditKind::Rename => self.cfg.lang.e_rename_hint(),
+                                            EditKind::Duplicate => self.cfg.lang.e_duplicate_hint(),
+                                        };
+                                        let resp = ui.add(
+                                            egui::TextEdit::singleline(&mut text)
+                                                .hint_text(hint)
+                                                .desired_width(220.0),
+                                        );
+                                        let can = !busy && !text.trim().is_empty();
+                                        if ui
+                                            .add_enabled(can, egui::Button::new(t.submit))
+                                            .clicked()
+                                            || (can
+                                                && resp.lost_focus()
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                                        {
+                                            go = true;
+                                        }
+                                        if ui.button(t.cancel).clicked() {
+                                            cancel = true;
+                                        }
+                                    });
+                                    if go {
+                                        let to = text.trim().to_string();
+                                        act = Some(match kind {
+                                            EditKind::Rename => Act::Rename(name.clone(), to),
+                                            EditKind::Duplicate => Act::Duplicate(name.clone(), to),
+                                        });
+                                    }
+                                    if go || cancel {
+                                        self.name_edit = None;
+                                    }
+                                }
                                 // 账号信息单独一行：同一行已有「名字 + 状态 + 4 个按钮」，
                                 // 再塞账号 ID 在窄窗口会把按钮挤掉。
                                 if uid.is_some() || dup.is_some() {
@@ -1378,7 +1527,9 @@ impl eframe::App for App {
             self.apply(ctx, a);
         }
         if lang_changed {
-            install::save_config(&self.cfg.clone());
+            if let Err(e) = install::save_config(&self.cfg) {
+                install::log_error("保存界面语言 config.json", &e);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(
                 self.cfg.lang.s().app_title.to_string(),
             ));

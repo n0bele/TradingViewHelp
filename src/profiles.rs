@@ -63,10 +63,18 @@ pub fn account_id(profile: &Profile) -> Option<String> {
     (!raw.is_empty()).then(|| raw.to_string())
 }
 
-fn set_account_id(profile: &Profile, uid: &str) {
+/// 返回是否写成功：写不上就查不出"这个档案绑的是哪个账号"，同账号双开会撞服务端限制。
+fn set_account_id(profile: &Profile, uid: &str) -> bool {
     let uid = uid.trim();
-    if !uid.is_empty() {
-        let _ = fs::write(profile.dir.join(UID_FILE), uid);
+    if uid.is_empty() {
+        return false;
+    }
+    match crate::install::write_atomic(&profile.dir.join(UID_FILE), uid.as_bytes()) {
+        Ok(()) => true,
+        Err(e) => {
+            crate::install::log_error("写账号绑定 .tvx-user", &e);
+            false
+        }
     }
 }
 
@@ -178,7 +186,7 @@ pub fn refresh_account(profile: &Profile) -> Option<(String, Option<String>)> {
         return None;
     }
     let uid = detect_uid_from_storage(profile)?;
-    set_account_id(profile, &uid);
+    let _ = set_account_id(profile, &uid);
     let other = same_account_others(profile, &uid)
         .into_iter()
         .find(|(_, running)| *running)
@@ -228,6 +236,88 @@ pub fn remove(profile: &Profile, lang: Lang) -> Result<()> {
 
     fs::remove_dir_all(&profile.dir)
         .with_context(|| format!("删除 {}", profile.dir.display()))?;
+    Ok(())
+}
+
+/// 改名：目录跟着改，登录态原地保留（不复制任何数据）。
+/// 实例在跑时 Windows 会锁住目录，先要求停掉。
+pub fn rename(profile: &Profile, new_name: &str, lang: Lang) -> Result<Profile> {
+    if running_pid(profile).is_some() {
+        bail!(lang.p_running());
+    }
+    let new_name = validate_name(new_name, lang)?;
+    if new_name == profile.name {
+        return Ok(profile.clone());
+    }
+    let new_dir = profiles_root().join(&new_name);
+    if new_dir.exists() {
+        bail!(lang.p_dir_exists(&new_name));
+    }
+    fs::rename(&profile.dir, &new_dir).with_context(|| {
+        format!(
+            "改名 {} → {}",
+            profile.dir.display(),
+            new_dir.display()
+        )
+    })?;
+    // macOS 每个账号有一份 .app 副本，bundle id 里带着旧账号名：删掉，下次启动按新名重建
+    #[cfg(target_os = "macos")]
+    crate::macos_app::remove_profile_app(profile);
+    Ok(Profile {
+        name: new_name,
+        dir: new_dir,
+    })
+}
+
+/// 复制档案：整份复制账号目录（登录态一起带走），用于备份或另起一份试验配置。
+/// `.tvx-pid` 不复制——副本必须是"未启动"状态；
+/// `.tvx-user` 保留，所以副本仍被认作同一个 TradingView 账号（同账号双开会被服务端拒，
+/// 这不是客户端能绕的），真要用就登录另一个账号。
+pub fn duplicate(profile: &Profile, new_name: &str, lang: Lang) -> Result<Profile> {
+    let new_name = validate_name(new_name, lang)?;
+    let new_dir = profiles_root().join(&new_name);
+    if new_dir.exists() {
+        bail!(lang.p_dir_exists(&new_name));
+    }
+    fs::create_dir_all(&new_dir)?;
+    let result = (|| -> Result<()> {
+        for entry in fs::read_dir(&profile.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name == ".tvx-pid" {
+                continue;
+            }
+            let to = new_dir.join(&name);
+            if entry.file_type()?.is_dir() {
+                copy_dir(&entry.path(), &to)?;
+            } else {
+                fs::copy(entry.path(), &to)?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        // 复制一半的目录没有任何价值，直接清掉，别给用户留个"看起来存在"的坏档案
+        let _ = fs::remove_dir_all(&new_dir);
+        return Err(e);
+    }
+    Ok(Profile {
+        name: new_name,
+        dir: new_dir,
+    })
+}
+
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
     Ok(())
 }
 
@@ -412,7 +502,13 @@ pub fn proxy_unreachable() -> Option<String> {
 
 /// 记录"当前登录目标账号"（协议命令被应用改写时按它恢复）
 fn write_login_target(profile: &Profile) {
-    let _ = fs::write(crate::install::tvx_root().join("login-target"), profile.dir.display().to_string());
+    let path = crate::install::tvx_root().join("login-target");
+    if let Err(e) =
+        crate::install::write_atomic(&path, profile.dir.display().to_string().as_bytes())
+    {
+        // 写不上只影响深链路由的纠偏，不该阻断启动；但要有痕迹可查
+        crate::install::log_error("写登录目标 login-target", &e);
+    }
 }
 
 pub fn clear_login_target() {
@@ -543,7 +639,7 @@ pub fn route_auth(url: &str) {
         }
         if let (Some(uid), Some(t)) = (&uid, &target) {
             if &p.dir.display().to_string() == t {
-                set_account_id(&p, uid);
+                let _ = set_account_id(&p, uid);
                 auth_log(&format!("  账号 {uid} 已绑定到 {}", p.name));
                 let others = same_account_others(&p, uid);
                 if let Some((name, _)) = others.iter().find(|(_, running)| *running) {
@@ -638,7 +734,9 @@ fn record_spawned(pid: u32) {
     // 只留最近 20 个：pid 会被系统复用，留太多反而误跳过
     let keep = ids.len().saturating_sub(20);
     let list: Vec<String> = ids[keep..].iter().map(|i| i.to_string()).collect();
-    let _ = fs::write(&p, format!("{}\n", list.join("\n")));
+    if let Err(e) = crate::install::write_atomic(&p, format!("{}\n", list.join("\n")).as_bytes()) {
+        crate::install::log_error("写 handoff 去重列表", &e);
+    }
 }
 
 #[cfg(windows)]
@@ -785,6 +883,18 @@ pub fn capture_handoff_once(secs: u32) -> Option<(u32, String)> {
     got
 }
 
+/// 同时运行的实例上限：每个实例是一整棵 Electron 进程树（渲染 + GPU + 网络），
+/// 8 个覆盖常见多账号场景；再多先撞内存，而不是撞服务端。
+pub const MAX_RUNNING: usize = 8;
+
+/// 当前在跑的实例数（按 PID 文件 + 进程映像校验，不依赖界面缓存）
+pub fn running_count() -> usize {
+    list()
+        .into_iter()
+        .filter(|p| running_pid(p).is_some())
+        .count()
+}
+
 pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<u32> {
     if let Some(pid) = running_pid(profile) {
         return Ok(pid);
@@ -796,7 +906,7 @@ pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<u32> {
     // 先尝试从 localStorage 里把当前 user_id 认出来。
     let uid = account_id(profile).or_else(|| {
         let d = detect_uid_from_storage(profile)?;
-        set_account_id(profile, &d);
+        let _ = set_account_id(profile, &d);
         Some(d)
     });
     if let Some(uid) = &uid {
@@ -855,7 +965,14 @@ pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<u32> {
     let stamp = format!("{pid}:{}", win_proc::creation_time(pid).unwrap_or(0));
     #[cfg(not(windows))]
     let stamp = pid.to_string();
-    fs::write(pid_file(&profile.dir), stamp).ok();
+    // PID 文件是"停止/查重/托盘状态"的唯一依据，写不上等于实例失控：
+    // 进程已经起来了，不能假装启动成功，至少告诉用户 PID 和手动处理方式。
+    if let Err(e) = crate::install::write_atomic(&pid_file(&profile.dir), stamp.as_bytes()) {
+        crate::install::log_error("写 PID 文件", &e);
+        return Err(anyhow::anyhow!(
+            "实例已启动（PID {pid}），但 PID 记录写入失败：{e}。请在任务管理器里结束该进程后重试"
+        ));
+    }
 
     // 记录登录目标：应用启动后自己会改写协议命令，扫描线程会按它纠回来
     write_login_target(profile);
