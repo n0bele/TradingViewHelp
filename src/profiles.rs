@@ -269,10 +269,11 @@ pub fn rename(profile: &Profile, new_name: &str, lang: Lang) -> Result<Profile> 
     })
 }
 
-/// 复制档案：整份复制账号目录（登录态一起带走），用于备份或另起一份试验配置。
-/// `.tvx-pid` 不复制——副本必须是"未启动"状态；
-/// `.tvx-user` 保留，所以副本仍被认作同一个 TradingView 账号（同账号双开会被服务端拒，
-/// 这不是客户端能绕的），真要用就登录另一个账号。
+/// 复制档案：整份复制账号目录（登录态一起带走）。
+/// `.tvx-pid` 不复制——副本必须是"未启动"状态。
+/// `.tvx-user` 保留，所以副本仍是**同一个 TradingView 账号**：等于同一账号开第二个窗口
+/// （每个档案一个 --user-data-dir，客户端本身允许多实例）。服务端是否限制同账号并发
+/// 我们说了不算，所以启动时只给提示、不拦。
 pub fn duplicate(profile: &Profile, new_name: &str, lang: Lang) -> Result<Profile> {
     let new_name = validate_name(new_name, lang)?;
     let new_dir = profiles_root().join(&new_name);
@@ -500,14 +501,63 @@ pub fn proxy_unreachable() -> Option<String> {
     }
 }
 
-/// 记录"当前登录目标账号"（协议命令被应用改写时按它恢复）
+/// 登录目标的保鲜期：超过这个时间还没收到回调，就认为那次登录已经放弃了。
+/// 过期后不再按它路由，避免几天前的残留把今天的回调带到别的窗口。
+const LOGIN_TARGET_TTL_SECS: u64 = 30 * 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 记录"当前登录目标账号"（协议回调按它决定投给哪个实例）
 fn write_login_target(profile: &Profile) {
     let path = crate::install::tvx_root().join("login-target");
-    if let Err(e) =
-        crate::install::write_atomic(&path, profile.dir.display().to_string().as_bytes())
-    {
+    let body = format!("{}\n{}\n", profile.dir.display(), now_secs());
+    if let Err(e) = crate::install::write_atomic(&path, body.as_bytes()) {
         // 写不上只影响深链路由的纠偏，不该阻断启动；但要有痕迹可查
         crate::install::log_error("写登录目标 login-target", &e);
+    }
+}
+
+/// 读登录目标：账号目录 + 写入时间。旧格式只有一行目录，时间按"现在"算。
+fn read_login_target() -> Option<(String, u64)> {
+    let raw = fs::read_to_string(crate::install::tvx_root().join("login-target")).ok()?;
+    let mut lines = raw.lines();
+    let dir = lines.next()?.trim().to_string();
+    if dir.is_empty() {
+        return None;
+    }
+    let ts = lines
+        .next()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or_else(now_secs);
+    Some((dir, ts))
+}
+
+/// 回调该投给谁。`running` 是 (账号目录, 是否在跑)。
+///
+/// 只投给"最近一次登录目标"，绝不广播：回调 URL 里带着可用的登录 token，
+/// 广播给所有在跑的实例等于让几个账号同时被换成同一个账号。
+fn pick_auth_target(
+    target: Option<(&str, u64)>,
+    running: &[(&str, bool)],
+    now: u64,
+) -> Option<usize> {
+    if let Some((dir, ts)) = target {
+        if now.saturating_sub(ts) <= LOGIN_TARGET_TTL_SECS {
+            if let Some(i) = running.iter().position(|(d, alive)| *d == dir && *alive) {
+                return Some(i);
+            }
+        }
+    }
+    // 目标缺失或过期：只有在跑的实例恰好一个时才投，多个就放弃（宁可让用户重点一次登录）
+    let mut alive = running.iter().enumerate().filter(|(_, (_, a))| *a);
+    match (alive.next(), alive.next()) {
+        (Some((i, _)), None) => Some(i),
+        _ => None,
     }
 }
 
@@ -522,11 +572,12 @@ pub fn clear_login_target() {
 /// 落回默认 profile、窗口里的账号换不掉。所以每轮扫描都检查一次，被改了就纠回来。
 #[cfg(not(target_os = "macos"))]
 pub fn maintain_protocol_handler() {
-    let Ok(target) = fs::read_to_string(crate::install::tvx_root().join("login-target")) else {
+    let Some((target, ts)) = read_login_target() else {
         return;
     };
-    let target = target.trim().to_string();
-    if target.is_empty() {
+    // 过期的登录目标不再维持：否则几天后有个实例刚好叫这个名字且还开着，
+    // 协议命令就被重新指回来，用户手动改过的默认处理程序会被悄悄覆盖。
+    if now_secs().saturating_sub(ts) > LOGIN_TARGET_TTL_SECS {
         return;
     }
     // 目标账号必须真的在跑，否则不维持（避免残留）
@@ -619,12 +670,9 @@ pub fn route_auth(url: &str) {
     auth_log(&format!("收到回调：{}", mask_token(url)));
 
     // 回调 URL 里的 token 是本次登录的凭据：解出 user_id 就能把"这个档案登录了哪个账号"
-    // 记下来。只写到 login-target（启动时写入、扫描线程负责维持），不往别的档案头上记。
+    // 记下来。只能记到**一个**档案头上——广播式投递会让几个账号一起被换成同一个号。
     let uid = jwt_user_id(url);
-    let target = fs::read_to_string(crate::install::tvx_root().join("login-target"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let target = read_login_target();
 
     let Some(managed) = crate::install::load_managed() else {
         return;
@@ -632,40 +680,64 @@ pub fn route_auth(url: &str) {
     let Some(exe) = managed.exe() else {
         return;
     };
-    for p in list() {
-        if running_pid(&p).is_none() {
-            auth_log(&format!("  跳过 {}（没有实例在跑）", p.name));
-            continue;
-        }
-        if let (Some(uid), Some(t)) = (&uid, &target) {
-            if &p.dir.display().to_string() == t {
-                let _ = set_account_id(&p, uid);
-                auth_log(&format!("  账号 {uid} 已绑定到 {}", p.name));
-                let others = same_account_others(&p, uid);
-                if let Some((name, _)) = others.iter().find(|(_, running)| *running) {
-                    auth_log(&format!(
-                        "  ⚠ 同一账号已在「{name}」在线：同账号双开会触发服务端连接限制"
-                    ));
-                } else if let Some((name, _)) = others.first() {
-                    auth_log(&format!(
-                        "  ⚠ 该账号也登录过「{name}」：建议一个账号只保留一个档案"
-                    ));
-                }
+
+    let profiles = list();
+    let running: Vec<(String, bool)> = profiles
+        .iter()
+        .map(|p| {
+            let alive = running_pid(p).is_some();
+            if !alive {
+                auth_log(&format!("  跳过 {}（没有实例在跑）", p.name));
+            }
+            (p.dir.display().to_string(), alive)
+        })
+        .collect();
+    let running_ref: Vec<(&str, bool)> = running
+        .iter()
+        .map(|(d, a)| (d.as_str(), *a))
+        .collect();
+
+    let picked = pick_auth_target(
+        target.as_ref().map(|(d, t)| (d.as_str(), *t)),
+        &running_ref,
+        now_secs(),
+    );
+    let Some(idx) = picked else {
+        auth_log(
+            "  没有唯一可投递的目标（多个实例在跑，但没有新鲜的登录目标）：\
+             已丢弃本次回调，避免把登录态发给全部实例。请在要登录的那个窗口里重新点一次登录",
+        );
+        return;
+    };
+
+    let p = &profiles[idx];
+    if let (Some(uid), Some((dir, _))) = (&uid, target.as_ref()) {
+        if dir == &running[idx].0 {
+            let _ = set_account_id(p, uid);
+            auth_log(&format!("  账号 {uid} 已绑定到 {}", p.name));
+            let others = same_account_others(p, uid);
+            if let Some((name, _)) = others.iter().find(|(_, running)| *running) {
+                auth_log(&format!(
+                    "  ⚠ 同一账号也在「{name}」里运行：同账号多开可能撞服务端并发限制"
+                ));
+            } else if let Some((name, _)) = others.first() {
+                auth_log(&format!("  ⚠ 该账号也登录过「{name}」：建议一个账号只保留一个档案"));
             }
         }
-        auth_log(&format!("  转发给 {}", p.name));
-        if let Ok(child) = Command::new(&exe)
-            .arg(format!("--user-data-dir={}", p.dir.display()))
-            .arg(url)
-            .env_remove("ELECTRON_RUN_AS_NODE")
-            .env_remove("ELECTRON_NO_ATTACH_CONSOLE")
-            .env_remove("ELECTRON_ENABLE_LOGGING")
-            .env_remove("NODE_OPTIONS")
-            .spawn()
-        {
-            // 记下 pid：接管脚本要跳过它，别把我们正在用的实例当成"被抢的回调"杀掉
-            record_spawned(child.id());
-        }
+    }
+
+    auth_log(&format!("  转发给 {}", p.name));
+    if let Ok(child) = Command::new(&exe)
+        .arg(format!("--user-data-dir={}", p.dir.display()))
+        .arg(url)
+        .env_remove("ELECTRON_RUN_AS_NODE")
+        .env_remove("ELECTRON_NO_ATTACH_CONSOLE")
+        .env_remove("ELECTRON_ENABLE_LOGGING")
+        .env_remove("NODE_OPTIONS")
+        .spawn()
+    {
+        // 记下 pid：接管脚本要跳过它，别把我们正在用的实例当成"被抢的回调"杀掉
+        record_spawned(child.id());
     }
 }
 
@@ -895,28 +967,34 @@ pub fn running_count() -> usize {
         .count()
 }
 
-pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<u32> {
+/// 启动结果：PID 之外还要带回"不致命但该让用户知道"的提示。
+pub struct Launched {
+    pub pid: u32,
+    /// 同一账号在别的档案里也在跑：**不阻止**（客户端本身允许多开，
+    /// 每个档案一个 --user-data-dir 就是独立实例），只提示可能撞服务端并发限制。
+    pub warning: Option<String>,
+}
+
+pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<Launched> {
     if let Some(pid) = running_pid(profile) {
-        return Ok(pid);
+        return Ok(Launched { pid, warning: None });
     }
 
-    // 一个账号一个 profile：同账号的另一个实例正在线时直接拒绝启动。
-    // 服务端按账号限制并发连接，同账号双开等于主动撞限制——表现就是某个窗口
-    // 静默停更（弹窗被自动恢复盖过去了也还是会反复断）。档案还没绑定时，
-    // 先尝试从 localStorage 里把当前 user_id 认出来。
+    // 同账号多开：老版本在这里直接拒绝，理由是"服务端按账号限制并发连接"。
+    // 但这属于拿不准的推断——客户端本身不拦（每个 --user-data-dir 一个实例），
+    // 真正会撞限制的是同一账号的多个窗口抢行情连接。所以改成"允许 + 提示"：
+    // 用户要一间屋子开两个窗口看不同品种是合理需求，出问题自己关一个即可。
     let uid = account_id(profile).or_else(|| {
         let d = detect_uid_from_storage(profile)?;
         let _ = set_account_id(profile, &d);
         Some(d)
     });
-    if let Some(uid) = &uid {
-        if let Some((name, _)) = same_account_others(profile, uid)
+    let warning = uid.as_ref().and_then(|uid| {
+        same_account_others(profile, uid)
             .into_iter()
             .find(|(_, running)| *running)
-        {
-            bail!(lang.dup_account(uid, &name));
-        }
-    }
+            .map(|(name, _)| lang.warn_same_account(&profile.name, &name, uid))
+    });
     // macOS：每个账号一份独立的 .app 副本（独立 bundle id → 独立 userData 与 scheme 归属）
     #[cfg(target_os = "macos")]
     let exe = {
@@ -986,7 +1064,7 @@ pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<u32> {
     #[cfg(not(target_os = "macos"))]
     let _ = crate::protocol::set_target(&exe, Some(&profile.dir));
 
-    Ok(pid)
+    Ok(Launched { pid, warning })
 }
 
 pub fn stop(pid: u32) -> Result<()> {
@@ -1031,6 +1109,38 @@ mod tests {
         // 不是 token 的回调 / 残缺 token 一律返回 None，不能猜
         assert_eq!(jwt_user_id("tradingview://auth?token=fake4"), None);
         assert_eq!(jwt_user_id("tradingview://browser-auth/?state=1"), None);
+    }
+
+    /// 登录回调只能投给一个实例。以前是广播给所有在跑的实例——token 是可用凭据，
+    /// 广播等于让几个账号一起被换成同一个号。
+    #[test]
+    fn auth_callback_targets_one_instance_only() {
+        let running = [("/a", true), ("/b", true)];
+        // 登录目标是 /b：只投 b
+        assert_eq!(pick_auth_target(Some(("/b", 100)), &running, 200), Some(1));
+        // 目标过期（超过保鲜期）且不止一个实例：放弃，宁可让用户重点一次登录
+        assert_eq!(
+            pick_auth_target(Some(("/b", 0)), &running, LOGIN_TARGET_TTL_SECS + 1),
+            None
+        );
+        // 目标目录没在跑（被改名/删掉）：不投
+        assert_eq!(pick_auth_target(Some(("/c", 100)), &running, 200), None);
+        // 没有目标但只有一个实例在跑：投给它
+        assert_eq!(
+            pick_auth_target(None, &[("/a", true), ("/b", false)], 200),
+            Some(0)
+        );
+        // 没有目标、也没有实例：不投
+        assert_eq!(pick_auth_target(None, &[("/a", false)], 200), None);
+    }
+
+    /// 目标文件格式：第一行目录，第二行写入时间（旧格式只有一行，按"现在"算）
+    #[test]
+    fn login_target_format_roundtrip() {
+        let body = format!("{}\n{}\n", "/x", 1234u64);
+        let mut lines = body.lines();
+        assert_eq!(lines.next(), Some("/x"));
+        assert_eq!(lines.next().and_then(|s| s.parse::<u64>().ok()), Some(1234));
     }
 
     /// 只有全库唯一 userId 才采信；出现第二个就不猜（宁可不拦，也不误拦）
@@ -1123,7 +1233,7 @@ mod tests {
         let p = create(name, Lang::Zh).expect("创建档案失败");
         assert!(p.dir.is_dir());
 
-        let pid = launch(&managed, &p, Lang::Zh).expect("启动失败");
+        let pid = launch(&managed, &p, Lang::Zh).expect("启动失败").pid;
         // Windows：启动后深链协议必须指向这个账号的目录，否则浏览器回调会落错 profile
         #[cfg(windows)]
         {
@@ -1207,8 +1317,8 @@ mod multi_tests {
             made.push(create(n, Lang::Zh).expect("建档案失败"));
         }
 
-        let p1 = launch(&managed, &made[0], Lang::Zh).expect("启动 1 失败");
-        let p2 = launch(&managed, &made[1], Lang::Zh).expect("启动 2 失败");
+        let p1 = launch(&managed, &made[0], Lang::Zh).expect("启动 1 失败").pid;
+        let p2 = launch(&managed, &made[1], Lang::Zh).expect("启动 2 失败").pid;
         assert_ne!(p1, p2, "两个实例不应是同一个进程");
 
         std::thread::sleep(std::time::Duration::from_secs(9));
@@ -1226,6 +1336,41 @@ mod multi_tests {
 
         for p in &made {
             remove(p, Lang::Zh).ok();
+        }
+    }
+
+    /// 复制出来的档案要能**和原档案同时运行**（同账号多开）。
+    /// 老版本在 launch 里直接拒绝同账号第二个实例，这条用例就是那个回归的护栏。
+    #[test]
+    #[ignore = "会真的启动两个 TradingView 实例"]
+    fn duplicate_launches_beside_original() {
+        let managed = install::load_managed().expect("先生成免弹窗副本");
+        let (a, b) = ("tvx-dup-a", "tvx-dup-b");
+        for n in [a, b] {
+            let d = profiles_root().join(n);
+            if d.exists() {
+                fs::remove_dir_all(&d).ok();
+            }
+        }
+        let pa = create(a, Lang::Zh).expect("建档案失败");
+        // 模拟"已经登录过"：绑定账号 ID，复制后两个档案会被认作同一账号
+        fs::write(pa.dir.join(UID_FILE), "123456").expect("写账号绑定失败");
+        let pb = duplicate(&pa, b, Lang::Zh).expect("复制失败");
+        assert_eq!(account_id(&pb).as_deref(), Some("123456"), "登录态应随目录一起复制");
+
+        let l1 = launch(&managed, &pa, Lang::Zh).expect("原档案启动失败");
+        let l2 = launch(&managed, &pb, Lang::Zh).expect("副本启动失败（同账号不应被拦）");
+        assert!(l2.warning.is_some(), "同账号多开要给出提示");
+        eprintln!("同账号两实例 PID: {} / {}", l1.pid, l2.pid);
+        std::thread::sleep(std::time::Duration::from_secs(9));
+        assert!(is_alive(l1.pid) && is_alive(l2.pid), "两个实例应同时存活");
+
+        stop(l1.pid).ok();
+        stop(l2.pid).ok();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(!is_alive(l1.pid) && !is_alive(l2.pid), "没停干净");
+        for p in [pa, pb] {
+            remove(&p, Lang::Zh).ok();
         }
     }
 }

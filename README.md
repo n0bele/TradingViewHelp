@@ -51,7 +51,25 @@ cargo build --release
 1. 先安装 TradingView 桌面版。
 2. 运行程序，「添加账号」→ 填名字 → 「启动」。
 3. 在弹出的 TradingView 窗口里登录；切换账号直接启动另一个即可。
-4. 账号卡片上可以「改名」或「复制」：改名保留登录态原地搬目录，复制会把账号目录整份复制一份（含登录态）。同时最多 8 个实例，多了先撞内存。
+4. 账号卡片上可以「改名」或「复制」：改名保留登录态原地搬目录；复制会把账号目录整份复制一份（含登录态），等于**同一账号开第二个窗口**——客户端本身允许多实例，不再拦截同账号，只在日志里提示可能撞服务端并发限制。
+
+## 多实例与数据隔离
+
+多开靠的是给每个档案传一个独立的 `--user-data-dir`，不是破解客户端的单实例锁（客户端本来就按 userData 目录分锁，不同目录 = 不同实例）。实测两个实例可同时存活，见 `profiles::multi_tests::two_profiles_at_once`（`cargo test -- --ignored`）。
+
+隔离边界说清楚：
+
+| 内容 | 位置 | 是否共享 |
+|---|---|---|
+| Cookies / Local Storage / IndexedDB / Cache / 登录态 | `~/.tvx/profiles/<账号>/` | 各档案独立 |
+| 界面偏好、图表本地缓存 | 同上（Chromium `Preferences` 等） | 各档案独立 |
+| 本地报警配置 `tvx-alerts.json` | 同上 | 各档案独立 |
+| 助手设置、副本版本号 | `~/.tvx/config.json`、`~/.tvx/active-app` | 全局共享（只有一个助手界面） |
+| 登录目标 `login-target` | `~/.tvx/login-target` | 全局，但只记**最近一次**登录目标（30 分钟保鲜），回调只投给它 |
+| `tradingview://` 协议处理程序 | Windows 注册表 / Linux .desktop | 系统级，天然只能有一个 |
+| `Documents/TradingView/configs/config.json` | 用户文档目录 | 若存在则被所有实例读取（TradingView 自己的查找路径，本工具不写） |
+
+已知不再发生的事：登录回调**不再广播给所有实例**。以前把授权 URL 同时投给每个在跑窗口，token 是可用凭据，几个账号可能一起被换成同一个号；现在只投给最近一次登录目标，找不到唯一目标就丢弃并记 `auth.log`，让用户重新点一次登录。
 
 ## 交流群
 

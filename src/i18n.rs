@@ -156,7 +156,7 @@ static ZH: S = S {
     cb_alerts: "本地指标报警",
     cb_alerts_hint: "在图表页加一个「报警」按钮：按当前图表的品种/周期/指标设条件，命中后发系统通知或邮件。只在本机运行，不占用也不绕过服务端报警配额",
     usage: "使用说明",
-    usage_note: "每个账号请登录不同的 TradingView 账号——同一账号多开会被服务端限制，表现为行情停止更新",
+    usage_note: "每个账号用独立档案（独立配置目录）；同一账号也能开多个窗口，但可能撞服务端并发限制，出现行情停更就关掉一个",
     tray_show: "显示主窗口",
     tray_quit: "退出",
     launching: "启动中… {s}s",
@@ -239,7 +239,7 @@ static EN: S = S {
     cb_alerts: "Local indicator alerts",
     cb_alerts_hint: "Adds an Alerts button on the chart page: conditions on the current chart's symbol/timeframe/indicator, delivered via system notification or email. Runs locally only; it neither uses nor bypasses the server-side alert quota",
     usage: "How to use",
-    usage_note: "Sign in with a different TradingView account per profile — using one account in several instances hits the server limit and feeds stop updating",
+    usage_note: "One profile = one isolated config directory; the same account can also run several windows, but may hit the server's concurrency limit - close one if feeds stop updating",
     tray_show: "Show window",
     tray_quit: "Quit",
     launching: "Starting… {s}s",
@@ -375,8 +375,8 @@ impl Lang {
 
     pub fn e_duplicate_hint(&self) -> String {
         self.pick(
-            "副本名字（会复制登录态，不能与现有账号重名）".into(),
-            "Copy name (login state is copied; must be unique)".into(),
+            "副本名字（登录态一起带走：等于同一账号再开一个窗口）".into(),
+            "Copy name (login state is copied: same account, second window)".into(),
         )
     }
 
@@ -629,16 +629,16 @@ impl Lang {
         )
     }
 
-    /// 同账号双开被拒绝时的说明（不是配额不够，是"撞配额"）
-    pub fn dup_account(&self, uid: &str, other: &str) -> String {
+    /// 同账号多开时的提示（允许启动，但要让用户知道风险）
+    pub fn warn_same_account(&self, name: &str, other: &str, uid: &str) -> String {
         self.pick(
             format!(
-                "「{other}」在线且登录的是同一个 TradingView 账号（{uid}）。\
-                 同一账号只能开一个实例：请换一个账号登录，或先停掉「{other}」"
+                "「{name}」和「{other}」登录的是同一个账号（{uid}）：两个窗口共用一份登录态，\
+                 TradingView 服务端可能限制同账号并发，出现行情停更就关掉其中一个"
             ),
             format!(
-                "\"{other}\" is already online with the same TradingView account ({uid}). \
-                 One account = one instance: sign in with a different account, or stop \"{other}\" first"
+                "\"{name}\" and \"{other}\" are signed in to the same account ({uid}). Both windows \
+                 share one login session; if feeds stop updating, close one of them"
             ),
         )
     }

@@ -679,9 +679,13 @@ impl App {
                 }
                 if let Some(p) = self.profiles.iter().find(|p| p.name == name).cloned() {
                     match profiles::launch(&m, &p, lang) {
-                        Ok(pid) => {
+                        Ok(l) => {
+                            let pid = l.pid;
                             self.launching.insert(p.name.clone(), Instant::now());
                             self.log(lang.log_launched(&p.name, pid));
+                            if let Some(w) = l.warning {
+                                self.log(w);
+                            }
                             // 约 10 秒后（页面已把登录态落盘）回填账号：
                             // 本功能之前创建的档案没有绑定记录，只能这样认一次。
                             let p2 = p.clone();
@@ -754,9 +758,12 @@ impl App {
                                 std::thread::sleep(Duration::from_secs(STAGGER_SECS));
                             }
                             match profiles::launch(&m, p, lang) {
-                                Ok(pid) => {
+                                Ok(l) => {
                                     started.push(p.clone());
-                                    push(lang.log_launching(&p.name, pid));
+                                    push(lang.log_launching(&p.name, l.pid));
+                                    if let Some(w) = l.warning {
+                                        push(w);
+                                    }
                                 }
                                 Err(e) => {
                                     push(lang.log_launch_one_failed(&p.name, &format!("{e:#}")))
