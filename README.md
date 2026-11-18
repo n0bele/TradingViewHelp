@@ -37,6 +37,10 @@
 - 客户端升级到新版后，界面会提示「发现新版（未验证）」但**不鼓励重建**——多数情况下继续用现有副本才是对的。
 - 想让新版本进白名单，需要拿该版本的 `index.js` 跑通全部锚点并实机登录一次，再把它加进 `VERIFIED_VERSIONS`。
 
+## 下载
+
+不想自己编译就去 [Releases](https://github.com/n0bele/TradingViewHelp/releases)：每个 `v*` 标签由 GitHub Actions 在 `windows-latest` 上构建、跑完测试后打包，产物是 `tvhelper-v<版本>-windows-x64.zip`（含 exe 与本文）和同名裸 exe。单文件绿色运行，无需安装。
+
 ## 构建
 
 需要 Rust stable。
