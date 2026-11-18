@@ -27,20 +27,6 @@
 - 设置存本机账号目录（`tvx-alerts.json`），重启后自动恢复；**图表没开、品种或周期不符、指标被删时只显示「未就绪」，不会硬触发**。
 - 边界：软件关闭就不监控；行情延迟随账号数据权限（免费版部分市场延迟 15 分钟）；服务端真正的报警（邮件/短信/webhook、关机也运行）仍然只有订阅才有。
 
-## 版本策略
-
-补丁是按 `resources/app/index.js` 里的字面代码片段定位的，而该文件是压缩产物，压缩标识符（`nk`、`(0,M.j9)` 这类）每次重打包都会变。所以**只对实测过的版本负责**：
-
-- 当前白名单只有一个版本：`3.5.0.8375`（`src/patch.rs` 的 `VERIFIED_VERSIONS`）。
-- 副本 `~/.tvx/apps/<版本>/` 是自包含的整份拷贝，**副本本身就是版本锁**：在 3.5.0.8375 上构建成功后，即使客户端后来自动升级，这份副本也不会被改动，可以继续用。
-- 界面默认只选白名单里的版本；其他版本会标「未验证」，要拿它构建副本必须先勾选风险确认。锚点打不上的条目会逐条列在日志里，不会静默当成成功。
-- 客户端升级到新版后，界面会提示「发现新版（未验证）」但**不鼓励重建**——多数情况下继续用现有副本才是对的。
-- 想让新版本进白名单，需要拿该版本的 `index.js` 跑通全部锚点并实机登录一次，再把它加进 `VERIFIED_VERSIONS`。
-
-## 下载
-
-不想自己编译就去 [Releases](https://github.com/n0bele/TradingViewHelp/releases)：每个 `v*` 标签由 GitHub Actions 在 `windows-latest` 上构建、跑完测试后打包，产物是 `tvhelper-v<版本>-windows-x64.zip`（含 exe 与本文）和同名裸 exe。单文件绿色运行，无需安装。
-
 ## 构建
 
 需要 Rust stable。
@@ -49,31 +35,6 @@
 cargo build --release
 # 产物：target/release/tvhelper(.exe)，Windows 另需 MSVC 工具链
 ```
-
-## 使用
-
-1. 先安装 TradingView 桌面版。
-2. 运行程序，「添加账号」→ 填名字 → 「启动」。
-3. 在弹出的 TradingView 窗口里登录；切换账号直接启动另一个即可。
-4. 账号卡片上可以「改名」：保留登录态原地搬目录，不复制任何数据。
-
-## 多实例与数据隔离
-
-多开靠的是给每个档案传一个独立的 `--user-data-dir`，不是破解客户端的单实例锁（客户端本来就按 userData 目录分锁，不同目录 = 不同实例）。实测两个实例可同时存活，见 `profiles::multi_tests::two_profiles_at_once`（`cargo test -- --ignored`）。
-
-隔离边界说清楚：
-
-| 内容 | 位置 | 是否共享 |
-|---|---|---|
-| Cookies / Local Storage / IndexedDB / Cache / 登录态 | `~/.tvx/profiles/<账号>/` | 各档案独立 |
-| 界面偏好、图表本地缓存 | 同上（Chromium `Preferences` 等） | 各档案独立 |
-| 本地报警配置 `tvx-alerts.json` | 同上 | 各档案独立 |
-| 助手设置、副本版本号 | `~/.tvx/config.json`、`~/.tvx/active-app` | 全局共享（只有一个助手界面） |
-| 登录目标 `login-target` | `~/.tvx/login-target` | 全局，但只记**最近一次**登录目标（30 分钟保鲜），回调只投给它 |
-| `tradingview://` 协议处理程序 | Windows 注册表 / Linux .desktop | 系统级，天然只能有一个 |
-| `Documents/TradingView/configs/config.json` | 用户文档目录 | 若存在则被所有实例读取（TradingView 自己的查找路径，本工具不写） |
-
-已知不再发生的事：登录回调**不再广播给所有实例**。以前把授权 URL 同时投给每个在跑窗口，token 是可用凭据，几个账号可能一起被换成同一个号；现在只投给最近一次登录目标，找不到唯一目标就丢弃并记 `auth.log`，让用户重新点一次登录。
 
 ## 交流群
 
