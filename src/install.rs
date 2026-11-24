@@ -306,6 +306,42 @@ fn check_env_dir(
     }
 }
 
+/// 客户端自己写日志的目录：`<appData>/TradingView/logs`。
+///
+/// 客户端建它的写法是 `exists(e) || createDir(e, {})`，而 `createDir` 就是
+/// `mkdirSync(p, {})` —— **非递归**。所以只要 `…\AppData\Roaming\TradingView`
+/// 这一层不存在，它在主进程启动阶段就会抛
+/// `ENOENT: no such file or directory, mkdir '…\TradingView\logs'`，
+/// 窗口还没出来就进 Critical Error（栈里只剩 mkdirSync / initializeWrite，
+/// 看不出是环境问题）。
+///
+/// 这一层为什么会缺：商店（MSIX）版的 appData 被系统重定向到
+/// `%LOCALAPPDATA%\Packages\<包名>\LocalCache\Roaming`，真正的
+/// `%APPDATA%\TradingView` 从来没被创建过。托管副本是**解包运行**、不重定向，
+/// 于是在"只装过商店版"的机器上第一次启动必崩。这不是用户环境的错，
+/// 是两边的 appData 落点不同，替它把父目录补上就行。
+pub fn client_logs_dir() -> Option<PathBuf> {
+    // Electron 的 `app.getPath("appData")` 取的是 shell 已知文件夹，
+    // **不看 `%APPDATA%` 环境变量**（实测：改环境变量后它照旧写原路径）。
+    // `dirs::data_dir()` 在 Windows 上同样走 SHGetKnownFolderPath，两边一致。
+    dirs::data_dir().map(|d| d.join("TradingView").join("logs"))
+}
+
+/// 幂等地把 `<app_data>/TradingView/logs` 建出来（递归，父层缺也一起补）。
+pub fn ensure_client_logs_dir_at(app_data: &Path) -> std::io::Result<PathBuf> {
+    let dir = app_data.join("TradingView").join("logs");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// 同上，用系统解析出的 appData。
+pub fn ensure_client_logs_dir() -> std::io::Result<PathBuf> {
+    let base = dirs::data_dir().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "无法确定 appData 目录")
+    })?;
+    ensure_client_logs_dir_at(&base)
+}
+
 /// 启动前的环境自查。返回空 = 正常；非空 = 一条条人话，直接可以给用户看。
 pub fn environment_problems() -> Vec<EnvProblem> {
     let mut out = Vec::new();
@@ -352,7 +388,23 @@ pub fn environment_problems() -> Vec<EnvProblem> {
         _ => {}
     }
 
-    // 3) 配置目录必须可建可写：PID/登录去重/开关都落在里面，写不上等于功能全废。
+    // 3) 客户端自己的日志目录。缺了它客户端会在启动阶段 ENOENT 崩掉，
+    //    所以这里不只是"检查"——直接替它建出来（幂等，已存在时什么也不做）。
+    //    这是"只装过商店版的机器"上客户端起不来的真正原因，见 client_logs_dir()。
+    match ensure_client_logs_dir() {
+        Ok(_) => {}
+        Err(e) => out.push(EnvProblem::new(
+            "client-logs",
+            format!(
+                "客户端日志目录建不了：{}（{e}）——客户端启动会以 ENOENT 崩溃",
+                client_logs_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(未知)".into())
+            ),
+        )),
+    }
+
+    // 4) 配置目录必须可建可写：PID/登录去重/开关都落在里面，写不上等于功能全废。
     let root = tvx_root();
     if let Err(e) = fs::create_dir_all(&root) {
         out.push(EnvProblem::new(
@@ -408,6 +460,19 @@ pub fn doctor_report() -> String {
             s.push_str(&format!("  ! [{}] {}\n", p.key, p.detail));
         }
     }
+
+    // 上面 environment_problems() 会顺手把客户端的日志目录建出来，这里报最终状态
+    let logs = client_logs_dir();
+    s.push_str(&format!(
+        "客户端日志目录: {} [{}]\n",
+        logs.as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(未知)".into()),
+        match &logs {
+            Some(p) if p.is_dir() => "已就绪",
+            _ => "建不了",
+        }
+    ));
 
     let list = crate::profiles::list();
     s.push_str(&format!("账号: {} 个\n", list.len()));
@@ -922,6 +987,26 @@ fn copy_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 客户端的 `createDir(e, {})` 是非递归 mkdir，父层 `TradingView` 不存在时
+    /// 它必崩（`ENOENT: mkdir '…\TradingView\logs'`）。所以助手必须能把整条
+    /// 路径一次建出来，而不是只建最后一级。
+    #[test]
+    fn client_logs_dir_is_created_with_missing_parent() {
+        let base = std::env::temp_dir().join(format!("tvx-logs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        // 模拟"只装过商店版"的机器：appData 在，TradingView 这一层不在
+        assert!(!base.join("TradingView").exists());
+
+        let dir = ensure_client_logs_dir_at(&base).expect("应当能建出来");
+        assert!(dir.is_dir(), "{} 没建出来", dir.display());
+        assert!(dir.ends_with("TradingView/logs") || dir.ends_with("TradingView\\logs"));
+
+        // 幂等：再调一次不报错
+        assert!(ensure_client_logs_dir_at(&base).is_ok());
+        let _ = fs::remove_dir_all(&base);
+    }
 
     /// 版本号必须按数字段比较：字符串比较会把 "3.10.1" 排在 "3.9.7" 前面，
     /// 于是客户端升级后反而锁定到旧副本。
