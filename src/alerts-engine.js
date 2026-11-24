@@ -1420,87 +1420,95 @@
     var host = document.createElement('div');
     host.id = 'tvx-alerts-host';
     host.style.cssText = 'position:fixed;inset:0;z-index:2147483000;pointer-events:none;';
-    var root = host.attachShadow ? host.attachShadow({ mode: 'open' }) : host;
+    // 不用 Shadow DOM：影子树会把 document.activeElement / event.target 重定向成宿主 div，
+    // 图表自己的全局键盘处理认不出「焦点在输入框里」，于是把每个按键当热键拦掉
+    // （preventDefault），面板里的输入框就一个字符都打不进去。样式改用 #tvx-alerts-host 前缀隔离。
+    var root = host;
+    // 送礼给推广浮层清理器（patch.rs 的 __tvxGuard）：它是按文案/结构猜的，
+    // 面板进 light DOM 后文本对它可见，标记一下让它永不误伤
+    host.__tvxH = 1;
 
     var style = document.createElement('style');
     style.textContent = [
-      ':host{all:initial}',
+      '#tvx-alerts-host{all:initial}',
+      '#tvx-alerts-host,#tvx-alerts-host *{box-sizing:border-box}',
+      '#tvx-alerts-host *{font-family:-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}',
       // 悬浮入口：品牌色实心胶囊，带铃铛和计数，比原来的灰字显眼得多
-      '.tvxa-pill{pointer-events:auto;position:fixed;right:64px;bottom:28px;display:flex;align-items:center;gap:7px;',
+      '#tvx-alerts-host .tvxa-pill{pointer-events:auto;position:fixed;right:64px;bottom:28px;display:flex;align-items:center;gap:7px;',
       'padding:8px 13px 8px 11px;border-radius:20px;border:1px solid rgba(41,98,255,.75);background:#2962ff;',
       'color:#fff;font:600 12px/1 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;cursor:pointer;',
       'box-shadow:0 6px 18px rgba(41,98,255,.42);transition:transform .15s,box-shadow .15s,background .15s;z-index:2}',
-      '.tvxa-pill:hover{background:#1e53e5;transform:translateY(-1px);box-shadow:0 8px 22px rgba(41,98,255,.55)}',
-      '.tvxa-pill .tvxa-ico{display:flex;align-items:center}',
-      '.tvxa-pill-count{background:rgba(255,255,255,.24);border-radius:9px;padding:1px 5px;font-size:10px}',
-      '.tvxa-pill.toolbar-hidden{display:none}',
-      '.tvxa-hot{animation:tvxaPulse 1s ease-in-out 3}',
+      '#tvx-alerts-host .tvxa-pill:hover{background:#1e53e5;transform:translateY(-1px);box-shadow:0 8px 22px rgba(41,98,255,.55)}',
+      '#tvx-alerts-host .tvxa-pill .tvxa-ico{display:flex;align-items:center}',
+      '#tvx-alerts-host .tvxa-pill-count{background:rgba(255,255,255,.24);border-radius:9px;padding:1px 5px;font-size:10px}',
+      '#tvx-alerts-host .tvxa-pill.toolbar-hidden{display:none}',
+      '#tvx-alerts-host .tvxa-hot{animation:tvxaPulse 1s ease-in-out 3}',
       '@keyframes tvxaPulse{0%,100%{box-shadow:0 6px 18px rgba(41,98,255,.42)}',
       '50%{box-shadow:0 0 0 6px rgba(242,54,69,.55)}}',
-      '.tvxa-mask{pointer-events:auto;position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;',
+      '#tvx-alerts-host .tvxa-mask{pointer-events:auto;position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;',
       'align-items:center;justify-content:center}',
-      '.tvxa-card{width:680px;max-width:calc(100vw - 40px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;',
+      '#tvx-alerts-host .tvxa-card{width:680px;max-width:calc(100vw - 40px);max-height:calc(100vh - 24px);display:flex;flex-direction:column;',
       'background:#1e222d;color:#d1d4dc;border:1px solid #363a45;border-radius:10px;overflow:hidden;',
       'box-shadow:0 12px 48px rgba(0,0,0,.5);font:13px/1.45 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}',
-      '.tvxa-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #2a2e39}',
-      '.tvxa-title{font-size:14px;font-weight:600;flex:1}',
-      '.tvxa-chart{font-size:12px;color:#787b86}',
-      '.tvxa-tabs{display:flex;gap:4px;padding:8px 14px 0}',
-      '.tvxa-tab{padding:5px 12px;border-radius:6px 6px 0 0;background:transparent;border:1px solid transparent;',
+      '#tvx-alerts-host .tvxa-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #2a2e39}',
+      '#tvx-alerts-host .tvxa-title{font-size:14px;font-weight:600;flex:1}',
+      '#tvx-alerts-host .tvxa-chart{font-size:12px;color:#787b86}',
+      '#tvx-alerts-host .tvxa-tabs{display:flex;gap:4px;padding:8px 14px 0}',
+      '#tvx-alerts-host .tvxa-tab{padding:5px 12px;border-radius:6px 6px 0 0;background:transparent;border:1px solid transparent;',
       'color:#a3a6af;cursor:pointer;font:inherit}',
-      '.tvxa-tab.on{background:#2a2e39;border-color:#363a45;border-bottom-color:#2a2e39;color:#e6e8ec}',
-      '.tvxa-body{padding:12px 14px 16px;overflow:auto;flex:1}',
-      '.tvxa-section{border:1px solid #2a2e39;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#1b1f29}',
-      '.tvxa-sec-title{font-size:12px;font-weight:600;color:#e6e8ec;margin-bottom:6px;letter-spacing:.3px}',
+      '#tvx-alerts-host .tvxa-tab.on{background:#2a2e39;border-color:#363a45;border-bottom-color:#2a2e39;color:#e6e8ec}',
+      '#tvx-alerts-host .tvxa-body{padding:12px 14px 16px;overflow:auto;flex:1}',
+      '#tvx-alerts-host .tvxa-section{border:1px solid #2a2e39;border-radius:8px;padding:8px 10px;margin-bottom:8px;background:#1b1f29}',
+      '#tvx-alerts-host .tvxa-sec-title{font-size:12px;font-weight:600;color:#e6e8ec;margin-bottom:6px;letter-spacing:.3px}',
       // 报警列表：照原生「警报」列表的样子——一行一条、无卡片框、细节收进展开区
-      '.tvxa-listhead{font-size:11px;color:#787b86;padding:2px 2px 6px;letter-spacing:.2px}',
-      '.tvxa-arow{border-bottom:1px solid #262a34}',
-      '.tvxa-arow:last-child{border-bottom:0}',
-      '.tvxa-arow.off{opacity:.62}',
-      '.tvxa-ahead{display:flex;align-items:center;gap:9px;padding:9px 4px;border-radius:6px;cursor:pointer}',
-      '.tvxa-ahead:hover{background:#232733}',
-      '.tvxa-adot{width:7px;height:7px;border-radius:50%;background:#787b86;flex:0 0 auto}',
-      '.tvxa-adot.ok{background:#26a69a}',
-      '.tvxa-adot.fire{background:#2962ff}',
-      '.tvxa-adot.warn{background:#e0a03a}',
-      '.tvxa-adot.off{background:#4a4e5a}',
-      '.tvxa-amain{flex:1;min-width:0}',
-      '.tvxa-atitle{font-size:13px;font-weight:600;color:#e6e8ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-      '.tvxa-asub{font-size:11px;color:#787b86;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-      '.tvxa-aright{display:flex;align-items:center;gap:6px;flex:0 0 auto;color:#787b86;font-size:11px}',
-      '.tvxa-mini{background:transparent;border:0;color:#787b86;cursor:pointer;font:14px/1 inherit;padding:2px 5px;border-radius:4px}',
-      '.tvxa-mini:hover{background:#333846;color:#d1d4dc}',
-      '.tvxa-adetail{display:none;padding:2px 4px 10px 22px;font-size:12px;color:#9aa0aa}',
-      '.tvxa-arow.open .tvxa-adetail{display:block}',
-      '.tvxa-kv{margin-top:3px;line-height:1.5;word-break:break-word}',
-      '.tvxa-chip{font-size:11px;padding:2px 7px;border-radius:10px;border:1px solid #3d4250;color:#a3a6af}',
-      '.tvxa-chip.ok{color:#4caf50;border-color:#2e5c33}',
-      '.tvxa-chip.warn{color:#e0a03a;border-color:#5c4a2a}',
-      '.tvxa-chip.off{color:#787b86}',
-      '.tvxa-chip.fire{color:#3d8bff;border-color:#2a4a7a}',
-      '.tvxa-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}',
-      '.tvxa-btn{padding:4px 10px;border-radius:6px;border:1px solid #3d4250;background:#2a2e39;color:#d1d4dc;',
+      '#tvx-alerts-host .tvxa-listhead{font-size:11px;color:#787b86;padding:2px 2px 6px;letter-spacing:.2px}',
+      '#tvx-alerts-host .tvxa-arow{border-bottom:1px solid #262a34}',
+      '#tvx-alerts-host .tvxa-arow:last-child{border-bottom:0}',
+      '#tvx-alerts-host .tvxa-arow.off{opacity:.62}',
+      '#tvx-alerts-host .tvxa-ahead{display:flex;align-items:center;gap:9px;padding:9px 4px;border-radius:6px;cursor:pointer}',
+      '#tvx-alerts-host .tvxa-ahead:hover{background:#232733}',
+      '#tvx-alerts-host .tvxa-adot{width:7px;height:7px;border-radius:50%;background:#787b86;flex:0 0 auto}',
+      '#tvx-alerts-host .tvxa-adot.ok{background:#26a69a}',
+      '#tvx-alerts-host .tvxa-adot.fire{background:#2962ff}',
+      '#tvx-alerts-host .tvxa-adot.warn{background:#e0a03a}',
+      '#tvx-alerts-host .tvxa-adot.off{background:#4a4e5a}',
+      '#tvx-alerts-host .tvxa-amain{flex:1;min-width:0}',
+      '#tvx-alerts-host .tvxa-atitle{font-size:13px;font-weight:600;color:#e6e8ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#tvx-alerts-host .tvxa-asub{font-size:11px;color:#787b86;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#tvx-alerts-host .tvxa-aright{display:flex;align-items:center;gap:6px;flex:0 0 auto;color:#787b86;font-size:11px}',
+      '#tvx-alerts-host .tvxa-mini{background:transparent;border:0;color:#787b86;cursor:pointer;font:14px/1 inherit;padding:2px 5px;border-radius:4px}',
+      '#tvx-alerts-host .tvxa-mini:hover{background:#333846;color:#d1d4dc}',
+      '#tvx-alerts-host .tvxa-adetail{display:none;padding:2px 4px 10px 22px;font-size:12px;color:#9aa0aa}',
+      '#tvx-alerts-host .tvxa-arow.open .tvxa-adetail{display:block}',
+      '#tvx-alerts-host .tvxa-kv{margin-top:3px;line-height:1.5;word-break:break-word}',
+      '#tvx-alerts-host .tvxa-chip{font-size:11px;padding:2px 7px;border-radius:10px;border:1px solid #3d4250;color:#a3a6af}',
+      '#tvx-alerts-host .tvxa-chip.ok{color:#4caf50;border-color:#2e5c33}',
+      '#tvx-alerts-host .tvxa-chip.warn{color:#e0a03a;border-color:#5c4a2a}',
+      '#tvx-alerts-host .tvxa-chip.off{color:#787b86}',
+      '#tvx-alerts-host .tvxa-chip.fire{color:#3d8bff;border-color:#2a4a7a}',
+      '#tvx-alerts-host .tvxa-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}',
+      '#tvx-alerts-host .tvxa-btn{padding:4px 10px;border-radius:6px;border:1px solid #3d4250;background:#2a2e39;color:#d1d4dc;',
       'cursor:pointer;font:12px/1.4 inherit}',
-      '.tvxa-btn:hover{background:#333846}',
-      '.tvxa-btn.primary{background:#2962ff;border-color:#2962ff;color:#fff}',
-      '.tvxa-btn.danger{color:#ff7b72;border-color:#5a3230}',
-      '.tvxa-btn.ph{padding:2px 7px;font-size:11px;color:#8ab0ff;border-color:#2f3f63;background:#1a2130}',
-      '.tvxa-field{margin-bottom:8px}',
-      '.tvxa-label{font-size:12px;color:#9aa0aa;margin-bottom:4px}',
-      '.tvxa-hint{font-size:11px;color:#787b86;margin-top:3px;line-height:1.5}',
-      '.tvxa-input{width:100%;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid #3d4250;',
+      '#tvx-alerts-host .tvxa-btn:hover{background:#333846}',
+      '#tvx-alerts-host .tvxa-btn.primary{background:#2962ff;border-color:#2962ff;color:#fff}',
+      '#tvx-alerts-host .tvxa-btn.danger{color:#ff7b72;border-color:#5a3230}',
+      '#tvx-alerts-host .tvxa-btn.ph{padding:2px 7px;font-size:11px;color:#8ab0ff;border-color:#2f3f63;background:#1a2130}',
+      '#tvx-alerts-host .tvxa-field{margin-bottom:8px}',
+      '#tvx-alerts-host .tvxa-label{font-size:12px;color:#9aa0aa;margin-bottom:4px}',
+      '#tvx-alerts-host .tvxa-hint{font-size:11px;color:#787b86;margin-top:3px;line-height:1.5}',
+      '#tvx-alerts-host .tvxa-input{width:100%;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid #3d4250;',
       'background:#131722;color:#d1d4dc;font:12px/1.4 inherit;outline:none}',
-      '.tvxa-input:focus{border-color:#2962ff}',
+      '#tvx-alerts-host .tvxa-input:focus{border-color:#2962ff}',
       'textarea.tvxa-input{resize:vertical;min-height:52px;font-family:inherit}',
-      '.tvxa-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
-      '.tvxa-stack{display:flex;flex-direction:column;gap:10px}',
-      '.tvxa-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}',
-      '.tvxa-check{display:flex;align-items:center;gap:6px;margin:6px 0;font-size:12px;color:#c9ccd3}',
-      '.tvxa-check input{accent-color:#2962ff}',
-      '.tvxa-info{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#a3a6af}',
-      '.tvxa-info b{color:#d1d4dc;font-weight:600}',
-      '.tvxa-empty{color:#787b86;font-size:12px;padding:18px 4px;text-align:center}',
-      '.tvxa-banner{pointer-events:none;position:fixed;left:50%;top:16px;transform:translate(-50%,-8px);',
+      '#tvx-alerts-host .tvxa-two{display:grid;grid-template-columns:1fr 1fr;gap:10px}',
+      '#tvx-alerts-host .tvxa-stack{display:flex;flex-direction:column;gap:10px}',
+      '#tvx-alerts-host .tvxa-three{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}',
+      '#tvx-alerts-host .tvxa-check{display:flex;align-items:center;gap:6px;margin:6px 0;font-size:12px;color:#c9ccd3}',
+      '#tvx-alerts-host .tvxa-check input{accent-color:#2962ff}',
+      '#tvx-alerts-host .tvxa-info{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#a3a6af}',
+      '#tvx-alerts-host .tvxa-info b{color:#d1d4dc;font-weight:600}',
+      '#tvx-alerts-host .tvxa-empty{color:#787b86;font-size:12px;padding:18px 4px;text-align:center}',
+      '#tvx-alerts-host .tvxa-banner{pointer-events:none;position:fixed;left:50%;top:16px;transform:translate(-50%,-8px);',
       'max-width:600px;padding:10px 14px;border-radius:8px;color:#f0f3fa;white-space:pre-wrap;',
       'font:12px/1.5 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;opacity:0;',
       'transition:opacity .2s,transform .2s;box-shadow:0 6px 24px rgba(0,0,0,.4)}'
@@ -1544,11 +1552,12 @@
     card.appendChild(tabs);
     card.appendChild(body);
     mask.appendChild(card);
-    root.appendChild(style);
+    // 样式进 head、面板进 body：light DOM 下才有真实的事件目标与 activeElement
+    (document.head || document.documentElement).appendChild(style);
     root.appendChild(pill);
     root.appendChild(banner);
     root.appendChild(mask);
-    document.documentElement.appendChild(host);
+    (document.body || document.documentElement).appendChild(host);
 
     UI = {
       host: host, root: root, pill: pill, pillLabel: pillLabel, pillCount: pillCount,
@@ -1573,10 +1582,13 @@
     mask.addEventListener('click', function (e) { if (e.target === mask) toggle(false); });
 
     document.addEventListener('keydown', function (e) {
-      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'a' || e.key === 'A')) {
+      // 焦点在面板的输入框里时不抢 Alt+A（那是要打字符/系统快捷键的人）
+      var t = e.target;
+      var typing = !!(t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'a' || e.key === 'A') && !typing) {
         e.preventDefault();
         toggle(!UI.open);
-      } else if (e.key === 'Escape' && UI.open) {
+      } else if (e.key === 'Escape' && UI.open && !typing) {
         toggle(false);
       }
     }, true);
@@ -2008,8 +2020,14 @@
     var v1 = FORM.value === '' || FORM.value == null ? (last == null ? '' : String(last)) : FORM.value;
     var valueInput = inputEl(v1, 'number', 'any');
     var value2Input = inputEl(FORM.value2 == null ? '' : FORM.value2, 'number', 'any');
+    // 数字框默认带 spinner；滚轮划过时先取消焦点，免得滚表单把阈值滚变了
+    [valueInput, value2Input].forEach(function (n) {
+      n.setAttribute('inputmode', 'decimal');
+      n.addEventListener('wheel', function () { n.blur(); }, { passive: true });
+    });
 
     var opGrid = el('div', 'tvxa-three');
+    // 阈值可直接手输；空着时预填当前价，下面小字只是提示，不是让你去点
     var v1Wrap = field('阈值', valueInput, last == null ? '' : '当前价 ' + fmtNum(last));
     var v2Wrap = field('上限（区间条件用）', value2Input);
     opGrid.appendChild(field('比较方式', condSel));
