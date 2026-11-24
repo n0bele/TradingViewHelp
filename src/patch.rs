@@ -189,9 +189,21 @@ const STUDY_ON_STUDY_UNLOCK: &str = "(function(){try{var n=0;(function p(){var o
 /// 每个图表实例共用的方法，实例级 + 原型级各打一次，后者保证同页后续新建的图表也生效。
 /// 轮询到图表实例出现为止（最多约 2 分钟），拿不到就静默放弃——宁可没解锁，也不能报错。
 ///
-/// **已知未验证项**：超过 30 条能否被服务端存档。客户端这道闸门拆了之后画得出来，
-/// 但布局保存是否也放行没有证据（测试环境里用 API 建的线本就不进 storage 同步，
-/// 无法据此判断）。所以这个开关默认开，但文档里明确写清"删图立即释放、超额存档未验证"。
+/// **端到端实测（2026-11-24，登录态 free 账号 + 副本实例 + CDP）**：
+///   - 注入生效：`window.__tvxDraw===1`、`chartModel.drawingsLimit()===null`；
+///   - 上限确实被拆：同一张图表连续建到 **40 条**趋势线（14 → 54 个 dataSource），
+///     全程没有 `PAYWALL_DRAWINGS_LIMIT` 弹窗（DOM 里无 paywall 节点）；
+///   - **服务端存档也放行**：超额绘图触发 `PUT charts-storage/layout/<id>/sources`
+///     返回 200、请求体里 39 条 `LineToolTrendLine`，整页重载后 39 条原样回来
+///     （53 = 14 基础源 + 39 绘图）——服务端没有第二道 30 的闸门；
+///   - 收尾用 `model.removeSource()` 逐条撤回并重载核对，布局回到 14 个基础源，
+///     确认超额的增减都不影响原有内容。
+///
+/// 唯一注意点：这里的注入依赖「主进程能执行 executeJavaScript」，而 Node 侧
+/// `NODE_OPTIONS` 里若带 `--require` 垫片（打包应用不支持多数 NODE_OPTION），
+/// 注入会整体静默不执行——助手启动实例时本来就 `env_remove("NODE_OPTIONS")`，
+/// 手工起实例排查时要照做，否则会误判成"补丁没生效"。
+///
 /// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
 #[cfg(test)]
 const DRAWINGS_UNLOCK: &str = "(function(){try{if(window.__tvxDraw)return;window.__tvxDraw=1;var n=0,NO=function(){return null};function ok(){try{var c=window._exposed_chartWidgetCollection,aw=c&&c.activeChartWidget,w=aw&&typeof aw.value=='function'?aw.value():null,m=w&&typeof w.model=='function'?w.model():null,raw=m&&typeof m.model=='function'?m.model():null;if(!raw)return 0;try{if(typeof raw.drawingsLimit=='function')raw.drawingsLimit=NO}catch(e){}try{var pr=Object.getPrototypeOf(raw);if(pr&&typeof pr.drawingsLimit=='function')pr.drawingsLimit=NO}catch(e){}try{return typeof raw.drawingsLimit=='function'&&null===raw.drawingsLimit()?1:0}catch(e){return 0}}catch(e){return 0}}function p(){if(ok()||n>120)return;n++;setTimeout(p,1e3)}p()}catch(e){}})();";
