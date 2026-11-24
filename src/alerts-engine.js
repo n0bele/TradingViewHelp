@@ -48,6 +48,14 @@
   ];
   var COND_CHANGED = 'changed_to';
 
+  /** 报警对象：盯指标输出，还是盯主图价格 */
+  var SOURCES = [
+    { id: 'study', label: '指标输出' },
+    { id: 'price', label: '价格（主图）' }
+  ];
+  /** 价格报警能用的比较方式：出现/消失是给离散列准备的，价格用不上 */
+  var PRICE_CONDS = ['cross_up', 'cross_down', 'gt', 'lt', 'in_range', 'out_range'];
+
   function isNum(v) {
     return typeof v === 'number' && isFinite(v);
   }
@@ -65,6 +73,9 @@
 
   var DEFAULT_TITLE = '{{ticker}} {{interval}} · {{study}} 报警';
   var DEFAULT_BODY = '{{ticker}} {{interval}} {{study}} · {{plot}} {{condition}} {{threshold}}\n当前 {{close}}（开 {{open}} 高 {{high}} 低 {{low}}）';
+  // 价格报警没有指标名，模板单独一套，免得消息里出现空格子
+  var DEFAULT_PRICE_TITLE = '{{ticker}} {{interval}} · 价格报警';
+  var DEFAULT_PRICE_BODY = '{{ticker}} {{interval}} 价格 {{condition}} {{threshold}}\n当前 {{value}}（开 {{open}} 高 {{high}} 低 {{low}}）';
 
   function condLabel(id) {
     if (id === COND_CHANGED) return '变为';
@@ -104,8 +115,8 @@
     return null;
   }
 
-  /** 主序列最后一根 K 线：{time, open, high, low, close, volume} */
-  function mainBar(ctx) {
+  /** 主序列（K 线容器）：mainSeries().bars() 优先，退化到 chart.getSeries() */
+  function seriesBars(ctx) {
     if (!ctx) return null;
     try {
       var a = ctx.a;
@@ -116,12 +127,44 @@
         var s = a.getSeries();
         b = s && typeof s.bars === 'function' ? s.bars() : null;
       }
-      if (!b) return null;
+      return b || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** 主序列最后一根 K 线：{time, open, high, low, close, volume} */
+  function mainBar(ctx) {
+    var b = seriesBars(ctx);
+    if (!b) return null;
+    try {
       var i = typeof b.lastIndex === 'function' ? b.lastIndex() : -1;
       if (i < 0) return null;
       var v = typeof b.valueAt === 'function' ? b.valueAt(i) : null;
       if (!v || typeof v[0] !== 'number') return null;
       return { time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 价格报警的取值：当前 K 线收盘价 + 上一根收盘价。
+   * 上穿/下穿必须拿「上一根」比，只拿当前值会永远判成第一次满足。
+   */
+  function pricePoint(ctx) {
+    var b = seriesBars(ctx);
+    if (!b) return null;
+    try {
+      var i = typeof b.lastIndex === 'function' ? b.lastIndex() : -1;
+      if (i < 0) return null;
+      var v = typeof b.valueAt === 'function' ? b.valueAt(i) : null;
+      if (!v || typeof v[0] !== 'number') return null;
+      var close = Number(v[4]);
+      if (!isFinite(close)) return null;
+      var p = i > 0 ? b.valueAt(i - 1) : null;
+      var prev = p && isFinite(Number(p[4])) ? Number(p[4]) : null;
+      return { time: v[0], close: close, prev: prev, bar: v };
     } catch (e) {
       return null;
     }
@@ -866,6 +909,9 @@
     if (al.resolution && String(al.resolution) !== ctx.resolution) {
       return { ok: false, reason: '周期不匹配：当前 ' + ctx.resolution };
     }
+    // 价格报警不依赖任何指标：只要品种/周期对上就能判定，
+    // 图上没有指标（哪怕指标槽位用完了）也照样能建。
+    if (al.source === 'price') return { ok: true, price: true, study: null, cond: null };
     var want = String(al.studyName || '').toLowerCase();
     var same = [];
     for (var i = 0; i < meta.length; i++) if (meta[i].name.toLowerCase() === want) same.push(meta[i]);
@@ -1067,9 +1113,11 @@
 
   function fire(al, ctx, cur, barTime, plotTitle) {
     var now = Date.now();
+    var isPrice = al.source === 'price';
     var vars = msgVars(ctx, al, plotTitle, cur);
-    var title = renderTemplate(al.msgTitle || DEFAULT_TITLE, vars) || 'TradingView 指标报警';
-    var body = renderTemplate(al.msgBody || DEFAULT_BODY, vars) ||
+    var title = renderTemplate(al.msgTitle || (isPrice ? DEFAULT_PRICE_TITLE : DEFAULT_TITLE), vars) ||
+      (isPrice ? 'TradingView 价格报警' : 'TradingView 指标报警');
+    var body = renderTemplate(al.msgBody || (isPrice ? DEFAULT_PRICE_BODY : DEFAULT_BODY), vars) ||
       (al.symbol + ' · ' + al.resolution + '\n' + describe(al));
 
     var payload = {
@@ -1122,19 +1170,37 @@
       var r = resolveAlert(al, meta, ctx);
       var rt = state(al.id);
       if (!r.ok) { rt.status = r.reason; continue; }
-      var ser = readSeries(ctx.a, r.study.id);
-      if (!ser) { rt.status = '指标暂无数据'; continue; }
-      var col = r.cond ? r.cond.col : al.plotIndex;
-      var cur = ser.cur[col + 1];
-      var prev = ser.prev ? ser.prev[col + 1] : null;
+
+      var cur;
+      var prev;
+      var barTime;
+      var plot;
+      var hit;
+      if (r.price) {
+        // 价格报警：取主图当前 K 线收盘价，跟上一根比
+        var pp = pricePoint(ctx);
+        if (!pp) { rt.status = '读不到价格'; continue; }
+        cur = pp.close;
+        prev = pp.prev;
+        barTime = pp.time;
+        plot = al.plotTitle || '价格';
+      } else {
+        var ser = readSeries(ctx.a, r.study.id);
+        if (!ser) { rt.status = '指标暂无数据'; continue; }
+        var col = r.cond ? r.cond.col : al.plotIndex;
+        cur = ser.cur[col + 1];
+        prev = ser.prev ? ser.prev[col + 1] : null;
+        barTime = ser.time;
+        plot = r.cond ? r.cond.title : (r.study.plots[al.plotIndex] ? r.study.plots[al.plotIndex].title : al.plotTitle);
+      }
       rt.value = cur;
-      if (rt.bar !== ser.time) {
-        rt.bar = ser.time;
-        rt.firedForBar = al.lastBarTime === ser.time;
+      if (rt.bar !== barTime) {
+        rt.bar = barTime;
+        rt.firedForBar = al.lastBarTime === barTime;
       }
       if (rt.firedForBar) { rt.status = '就绪（本根已触发）'; continue; }
-      var hit;
-      if (r.cond) hit = evalSignal(r.cond.mode, prev, cur);
+      if (r.price) hit = evalCond(al.condition, prev, cur, Number(al.value), Number(al.value2));
+      else if (r.cond) hit = evalSignal(r.cond.mode, prev, cur);
       else if (al.plotKind === 'discrete') hit = evalChangedTo(prev, cur, al.value);
       else hit = evalCond(al.condition, prev, cur, Number(al.value), Number(al.value2));
       if (!hit) {
@@ -1147,8 +1213,7 @@
         continue;
       }
       rt.firedForBar = true;
-      var plot = r.cond ? r.cond.title : (r.study.plots[al.plotIndex] ? r.study.plots[al.plotIndex].title : al.plotTitle);
-      fire(al, ctx, cur, ser.time, plot);
+      fire(al, ctx, cur, barTime, plot);
       if (al.once) { al.enabled = false; dirty = true; }
     }
     if (dirty) saveConfig();
@@ -1277,6 +1342,8 @@
   // ---------------------------------------------------------------- 设置页 UI
 
   var FORM = {
+    /** 'study' | 'price'：新建报警时盯指标输出还是盯主图价格 */
+    source: 'study',
     studyId: '',
     condIndex: 0,
     condition: 'cross_up',
@@ -1592,7 +1659,8 @@
       var sub = [];
       if (al.symbol) sub.push(al.symbol);
       if (al.resolution) sub.push(String(al.resolution));
-      if (al.studyName) sub.push(al.studyName);
+      if (al.source === 'price') sub.push('价格');
+      else if (al.studyName) sub.push(al.studyName);
       main.appendChild(el('div', 'tvxa-asub', sub.join(' · ')));
       var right = el('div', 'tvxa-aright');
       var time = el('div', 'tvxa-atime', agoText(al.lastFiredAt));
@@ -1689,6 +1757,28 @@
       body.appendChild(el('div', 'tvxa-empty', '当前没有可用的图表。打开一个图表标签再试。'));
       return;
     }
+
+    // ---- 报警对象：指标输出 / 价格。价格不依赖指标，所以放在"有没有指标"的判断之前。
+    var srcSel = selectEl(SOURCES.map(function (s) {
+      return { value: s.id, label: s.label };
+    }), FORM.source || 'study');
+    srcSel.addEventListener('change', function () {
+      FORM.source = srcSel.value === 'price' ? 'price' : 'study';
+      FORM.value = '';
+      FORM.value2 = '';
+      FORM.dvalue = '';
+      renderForm();
+    });
+    body.appendChild(section('报警对象', [field('类型', srcSel)],
+      FORM.source === 'price'
+        ? '盯主图当前 K 线收盘价，不需要任何指标，也不占指标槽位。'
+        : '盯图上已加载指标的输出列或脚本条件。'));
+
+    if (FORM.source === 'price') {
+      renderPriceForm(ctx);
+      return;
+    }
+
     var meta = studyMeta(ctx.a).filter(function (s) { return s.ok; });
     if (!meta.length) {
       body.appendChild(el('div', 'tvxa-empty', '当前图表上还没有加载完成的指标。先在图上添加指标，再回来建报警。'));
@@ -1853,7 +1943,138 @@
     }
     var condSection = section('条件', [condGrid, opGrid], condHint);
 
-    // ---- 周期和触发：不做输入，只标注与图表一致
+    // 创建时的校验与字段：指标报警要按「脚本条件 / 离散列 / 数值列」分开处理，
+    // 校验失败返回 {ok:false,msg}，由 renderTail 统一弹提示。
+    var makeAlert = function () {
+      if (curCond.source === 'alertcondition') {
+        if (!curCond.available) return { ok: false, msg: '这个条件客户端读不到信号，换一个条件' };
+        FORM.condition = 'appear';
+        FORM.value = 0;
+        FORM.value2 = 0;
+      } else if (curCond.mode === 'appear' || curCond.mode === 'disappear') {
+        FORM.condition = curCond.mode;
+        FORM.value = 0;
+        FORM.value2 = 0;
+      } else if (curCond.kind === 'discrete') {
+        FORM.condition = COND_CHANGED;
+        FORM.value = String(discreteSel.value);
+        FORM.value2 = '';
+      } else {
+        FORM.value = Number(valueInput.value);
+        FORM.value2 = Number(value2Input.value);
+        if (!condNeedsValue(FORM.condition)) {
+          FORM.value = 0;
+          FORM.value2 = 0;
+        } else if (FORM.condition === 'in_range' || FORM.condition === 'out_range') {
+          if (!isFinite(FORM.value) || !isFinite(FORM.value2)) return { ok: false, msg: '区间条件需要填写两个数值' };
+        } else if (!isFinite(FORM.value)) {
+          return { ok: false, msg: '阈值必须是数字' };
+        }
+      }
+      return {
+        ok: true,
+        alert: {
+          source: 'study',
+          studyName: current.name,
+          studyInputs: current.inputs,
+          condId: curCond.source === 'alertcondition' ? curCond.id : '',
+          condTitle: curCond.title,
+          condSource: curCond.source,
+          condMode: curCond.mode || '',
+          plotIndex: curCond.col,
+          plotTitle: curCond.title,
+          plotKind: curCond.source === 'alertcondition' ? 'signal' : curCond.kind,
+          plotType: curCond.type || '',
+          condition: FORM.condition,
+          value: FORM.value,
+          value2: FORM.value2
+        }
+      };
+    };
+
+    body.appendChild(condSection);
+    renderTail(body, ctx, makeAlert);
+  }
+
+  /** 价格报警的表单：只比收盘价，条件 + 阈值，其余交给共享尾部 */
+  function renderPriceForm(ctx) {
+    var body = UI.body;
+    var pp = pricePoint(ctx);
+    var last = pp && isFinite(pp.close) ? pp.close : null;
+    if (PRICE_CONDS.indexOf(FORM.condition) < 0) FORM.condition = 'cross_up';
+
+    var condSel = selectEl(CONDS.filter(function (c) { return PRICE_CONDS.indexOf(c.id) >= 0; })
+      .map(function (c) { return { value: c.id, label: c.label }; }), FORM.condition);
+    var v1 = FORM.value === '' || FORM.value == null ? (last == null ? '' : String(last)) : FORM.value;
+    var valueInput = inputEl(v1, 'number', 'any');
+    var value2Input = inputEl(FORM.value2 == null ? '' : FORM.value2, 'number', 'any');
+
+    var opGrid = el('div', 'tvxa-three');
+    var v1Wrap = field('阈值', valueInput, last == null ? '' : '当前价 ' + fmtNum(last));
+    var v2Wrap = field('上限（区间条件用）', value2Input);
+    opGrid.appendChild(field('比较方式', condSel));
+    opGrid.appendChild(v1Wrap);
+    opGrid.appendChild(v2Wrap);
+
+    var syncOps = function () {
+      var need = condNeedsValue(FORM.condition);
+      var isRange = need && (FORM.condition === 'in_range' || FORM.condition === 'out_range');
+      v1Wrap.style.display = need ? '' : 'none';
+      v2Wrap.style.display = isRange ? '' : 'none';
+    };
+    FORM.condition = condSel.value;
+    syncOps();
+    condSel.addEventListener('change', function () {
+      FORM.condition = condSel.value;
+      syncOps();
+    });
+
+    body.appendChild(section('价格条件', [opGrid],
+      '价格取主图当前 K 线的收盘价（实时）。上穿/下穿会拿上一根的收盘价比较，只在穿越那一下触发。'));
+
+    var makeAlert = function () {
+      if (!condNeedsValue(FORM.condition)) {
+        FORM.value = 0;
+        FORM.value2 = 0;
+      } else if (FORM.condition === 'in_range' || FORM.condition === 'out_range') {
+        FORM.value = Number(valueInput.value);
+        FORM.value2 = Number(value2Input.value);
+        if (!isFinite(FORM.value) || !isFinite(FORM.value2)) {
+          return { ok: false, msg: '区间条件需要填写两个数值' };
+        }
+      } else {
+        if (String(valueInput.value).trim() === '') return { ok: false, msg: '阈值必须是数字' };
+        FORM.value = Number(valueInput.value);
+        if (!isFinite(FORM.value)) return { ok: false, msg: '阈值必须是数字' };
+      }
+      return {
+        ok: true,
+        alert: {
+          source: 'price',
+          studyName: '',
+          studyInputs: null,
+          condId: '',
+          condTitle: '',
+          condSource: '',
+          condMode: '',
+          plotIndex: 0,
+          plotTitle: '价格',
+          plotKind: 'numeric',
+          plotType: '',
+          condition: FORM.condition,
+          value: FORM.value,
+          value2: FORM.value2
+        }
+      };
+    };
+    renderTail(body, ctx, makeAlert);
+  }
+
+  /**
+   * 表单尾部（周期提示 / 消息 / 通知 / 创建按钮）——指标报警与价格报警共用。
+   * `makeAlert()` 负责各自的字段与校验：返回 {ok:false,msg} 或 {ok:true,alert}。
+   */
+  function renderTail(body, ctx, makeAlert) {
     var info = el('div', 'tvxa-info');
     var infoPeriod = el('div');
     infoPeriod.innerHTML = '周期：<b>' + (ctx.resolution || '-') + '</b>（与图表一致）';
@@ -1861,14 +2082,22 @@
     infoTrigger.innerHTML = '触发：<b>每根 K 线最多一次</b>';
     info.appendChild(infoPeriod);
     info.appendChild(infoTrigger);
-    var periodSection = section('周期和触发', [info],
-      '不单独设置，始终跟随当前图表的品种与周期。');
+    body.appendChild(section('周期和触发', [info],
+      '不单独设置，始终跟随当前图表的品种与周期。'));
 
-    // ---- 消息：标题 + 内容 + 占位符
-    var titleInput = inputEl(FORM.msgTitle || '', 'text');
+    var isPrice = FORM.source === 'price';
+    var tplTitle = isPrice ? DEFAULT_PRICE_TITLE : DEFAULT_TITLE;
+    var tplBody = isPrice ? DEFAULT_PRICE_BODY : DEFAULT_BODY;
+    // 输入框里显示的就是最终模板；当前值还是"另一类的默认模板"时换成这一类的
+    var startTitle = FORM.msgTitle && FORM.msgTitle !== DEFAULT_TITLE && FORM.msgTitle !== DEFAULT_PRICE_TITLE
+      ? FORM.msgTitle : tplTitle;
+    var startBody = FORM.msgBody && FORM.msgBody !== DEFAULT_BODY && FORM.msgBody !== DEFAULT_PRICE_BODY
+      ? FORM.msgBody : tplBody;
+
+    var titleInput = inputEl(startTitle, 'text');
     var bodyInput = document.createElement('textarea');
     bodyInput.className = 'tvxa-input';
-    bodyInput.value = FORM.msgBody || '';
+    bodyInput.value = startBody;
     bodyInput.spellcheck = false;
     LAST_FIELD = bodyInput;
     [titleInput, bodyInput].forEach(function (n) {
@@ -1899,6 +2128,7 @@
       field('内容', bodyInput, '点击标签插入占位符：'),
       chips
     ], '触发时替换占位符后，作为通知标题/正文与邮件主题/正文发送。');
+    body.appendChild(msgSection);
 
     // ---- 通知：系统 / 邮件（可覆盖发件人与收件人）
     var sysChk = document.createElement('input');
@@ -1927,8 +2157,8 @@
       mailGrid.style.display = mailChk.checked ? '' : 'none';
     });
 
-    var notifySection = section('通知', [chkSys, chkMail, mailGrid],
-      'SMTP 在「通知设置」里配一次；这里的收发件人只对这一条生效。');
+    body.appendChild(section('通知', [chkSys, chkMail, mailGrid],
+      'SMTP 在「通知设置」里配一次；这里的收发件人只对这一条生效。'));
 
     var actions = el('div', 'tvxa-actions');
     actions.appendChild(btn('创建报警', 'primary', function () {
@@ -1938,71 +2168,32 @@
       FORM.notifyEmail = !!mailChk.checked;
       FORM.emailFrom = fromInput.value.trim();
       FORM.emailTo = toInput.value.trim();
-      if (curCond.source === 'alertcondition') {
-        if (!curCond.available) {
-          showBanner('这个条件客户端读不到信号，换一个条件', true);
-          return;
-        }
-        FORM.condition = 'appear';
-        FORM.value = 0;
-        FORM.value2 = 0;
-      } else if (curCond.mode === 'appear' || curCond.mode === 'disappear') {
-        FORM.condition = curCond.mode;
-        FORM.value = 0;
-        FORM.value2 = 0;
-      } else if (curCond.kind === 'discrete') {
-        FORM.condition = COND_CHANGED;
-        FORM.value = String(discreteSel.value);
-        FORM.value2 = '';
-      } else {
-        FORM.value = Number(valueInput.value);
-        FORM.value2 = Number(value2Input.value);
-        if (!condNeedsValue(FORM.condition)) {
-          FORM.value = 0;
-          FORM.value2 = 0;
-        } else if (FORM.condition === 'in_range' || FORM.condition === 'out_range') {
-          if (!isFinite(FORM.value) || !isFinite(FORM.value2)) {
-            showBanner('区间条件需要填写两个数值', true);
-            return;
-          }
-        } else if (!isFinite(FORM.value)) {
-          showBanner('阈值必须是数字', true);
-          return;
-        }
+
+      var built = makeAlert();
+      if (!built || !built.ok) {
+        showBanner((built && built.msg) || '条件不完整，检查后再建', true);
+        return;
       }
       var notify = [];
       if (FORM.notifySystem) notify.push('system');
       if (FORM.notifyEmail) notify.push('email');
       if (!notify.length) notify.push('system');
-      var al = {
-        id: newAlertId(),
-        symbol: ctx.symbol,
-        resolution: ctx.resolution,
-        studyName: current.name,
-        studyInputs: current.inputs,
-        condId: curCond.source === 'alertcondition' ? curCond.id : '',
-        condTitle: curCond.title,
-        condSource: curCond.source,
-        condMode: curCond.mode || '',
-        plotIndex: curCond.col,
-        plotTitle: curCond.title,
-        plotKind: curCond.source === 'alertcondition' ? 'signal' : curCond.kind,
-        plotType: curCond.type || '',
-        condition: FORM.condition,
-        value: FORM.value,
-        value2: FORM.value2,
-        cooldownMin: 0,
-        once: false,
-        msgTitle: FORM.msgTitle,
-        msgBody: FORM.msgBody,
-        notify: notify,
-        emailFrom: FORM.notifyEmail ? FORM.emailFrom : '',
-        emailTo: FORM.notifyEmail ? FORM.emailTo : '',
-        enabled: true,
-        createdAt: Date.now(),
-        lastFiredAt: 0,
-        lastBarTime: 0
-      };
+
+      var al = built.alert;
+      al.id = newAlertId();
+      al.symbol = ctx.symbol;
+      al.resolution = ctx.resolution;
+      al.cooldownMin = 0;
+      al.once = false;
+      al.msgTitle = FORM.msgTitle;
+      al.msgBody = FORM.msgBody;
+      al.notify = notify;
+      al.emailFrom = FORM.notifyEmail ? FORM.emailFrom : '';
+      al.emailTo = FORM.notifyEmail ? FORM.emailTo : '';
+      al.enabled = true;
+      al.createdAt = Date.now();
+      al.lastFiredAt = 0;
+      al.lastBarTime = 0;
       CFG.alerts.push(al);
       saveConfig().then(function (ok) {
         showBanner(ok ? '已创建：' + describe(al) : '保存失败，检查是否允许写入配置', !ok);
@@ -2010,11 +2201,6 @@
       });
     }));
     actions.appendChild(btn('取消', '', function () { gotoList(); }));
-
-    body.appendChild(condSection);
-    body.appendChild(periodSection);
-    body.appendChild(msgSection);
-    body.appendChild(notifySection);
     body.appendChild(actions);
   }
 
