@@ -169,7 +169,7 @@ fn default_true() -> bool {
 }
 
 /// tvx 的持久化配置。功能开关对应六条需求：
-/// 拦截广告网络 / 多图表解锁 / 指标叠加解锁 / 禁用自动更新 各自独立；
+/// 拦截广告网络 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 各自独立；
 /// 指标数量 / 布局保存 / 警报由服务端强制（实测拒绝码由服务端下发，
 /// 客户端无法解除），只能静音其升级弹窗，故共用 `silence_paywalls` 一个开关。
 /// `alerts` 是本地指标报警，与服务端报警配额无关，单独一个开关。
@@ -185,6 +185,9 @@ pub struct Config {
     pub charts_unlock: bool,
     #[serde(default = "default_true")]
     pub study_on_study: bool,
+    /// 单张图表的绘图数量上限（free 档 30，客户端 gate）
+    #[serde(default = "default_true")]
+    pub drawings_unlock: bool,
     #[serde(default = "default_true")]
     pub silence_paywalls: bool,
     #[serde(default = "default_true")]
@@ -205,6 +208,7 @@ impl Default for Config {
             ads_block: true,
             charts_unlock: true,
             study_on_study: true,
+            drawings_unlock: true,
             silence_paywalls: true,
             no_auto_update: true,
             auto_recover: true,
@@ -219,6 +223,7 @@ impl Config {
             ads_block: self.ads_block,
             charts_unlock: self.charts_unlock,
             study_on_study: self.study_on_study,
+            drawings_unlock: self.drawings_unlock,
             silence_paywalls: self.silence_paywalls,
             no_auto_update: self.no_auto_update,
             auto_recover: self.auto_recover,

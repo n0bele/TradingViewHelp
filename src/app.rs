@@ -950,6 +950,7 @@ impl App {
                             flags.ads_block,
                             flags.charts_unlock,
                             flags.study_on_study,
+                            flags.drawings_unlock,
                             flags.silence_paywalls,
                             flags.no_auto_update,
                         ));
@@ -1381,6 +1382,13 @@ impl eframe::App for App {
                 if ui
                     .checkbox(&mut self.cfg.study_on_study, t.cb_study)
                     .on_hover_text(t.cb_study_hint)
+                    .changed()
+                {
+                    toggled = true;
+                }
+                if ui
+                    .checkbox(&mut self.cfg.drawings_unlock, t.cb_drawings)
+                    .on_hover_text(t.cb_drawings_hint)
                     .changed()
                 {
                     toggled = true;

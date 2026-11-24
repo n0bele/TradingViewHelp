@@ -9,7 +9,12 @@
 //! 服务端报警配额，代价是软件关闭即停止监控。
 //! 多图表布局的图表数量 gate 在客户端（实测 `_exposed_chartWidgetCollection`
 //! 上的 `_checkProFeature`/`_planChartsLimit`，free 档实测 limit=1），可注入解除；
-//! 指标叠加（STUDY_ON_STUDY）的子指标上限同样 gate 在客户端：CDP 实测
+//! 单张图表的绘图数量（free 档 30）同样 gate 在客户端：图表页 bundle 里
+//! `drawingsPerChartLimit()` 从计划配置表取 `DRAWINGS_ON_CHART.limit`，
+//! 执法函数 `ensureDrawingsLimitAllowed(limitObj,delta,source)` 的第一条就是
+//! `limitObj===null` 直接放行；把 `chartModel.drawingsLimit()` 打空后 CDP 实测
+//! 连续建到 42 条不再弹 PAYWALL_DRAWINGS_LIMIT。**服务端是否接受 >30 条未验证**，
+//! 见该补丁的注释；指标叠加（STUDY_ON_STUDY）的子指标上限同样 gate 在客户端：CDP 实测
 //! `getConfig('STUDY_ON_STUDY')` 返回渲染进程内嵌计划配置表的共享对象
 //! （free 档 limit:800 / child_limit:1），执法方 `canCreateStudy` 经
 //! `featureLimit` 活读取该表，改写共享表后 featureLimit 实测联动放行——可注入解除。
@@ -49,14 +54,17 @@ pub fn is_verified(version: &str) -> bool {
 }
 
 /// 用户可配置的功能开关（持久化在 tvx 的 config.json）。
-/// 广告拦截 / 多图表解锁 / 指标叠加解锁 / 禁用自动更新 / 断线自愈各自独立；
-/// 指标数量 / 布局保存 / 警报由服务端强制（客户端无法解除拒绝），共用「屏蔽充值窗口」。
+/// 广告拦截 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 / 断线自愈
+/// 各自独立；指标数量 / 布局保存 / 警报由服务端强制（客户端无法解除拒绝），
+/// 共用「屏蔽充值窗口」。
 /// 登录回调直达不在其中：它是多账号能用起来的前提（见 `Group::Auth`），恒开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
     pub ads_block: bool,
     pub charts_unlock: bool,
     pub study_on_study: bool,
+    /// 单张图表的绘图数量上限（free 档 30）：客户端 gate，注入后不限
+    pub drawings_unlock: bool,
     pub silence_paywalls: bool,
     pub no_auto_update: bool,
     /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
@@ -72,6 +80,7 @@ impl Default for Flags {
             ads_block: true,
             charts_unlock: true,
             study_on_study: true,
+            drawings_unlock: true,
             silence_paywalls: true,
             no_auto_update: true,
             auto_recover: true,
@@ -91,6 +100,8 @@ pub enum Group {
     Charts,
     /// 指标叠加（STUDY_ON_STUDY）客户端 gate 解锁
     StudyOnStudy,
+    /// 单张图表的绘图数量（DRAWINGS_ON_CHART）客户端 gate 解锁
+    Drawings,
     /// 禁用启动时的自动更新检查
     NoAutoUpdate,
     /// 登录回调直达：每个实例把 `--user-data-dir` 写进 tradingview:// 注册，
@@ -111,6 +122,7 @@ impl Group {
             Group::Ads => f.ads_block,
             Group::Charts => f.charts_unlock,
             Group::StudyOnStudy => f.study_on_study,
+            Group::Drawings => f.drawings_unlock,
             Group::NoAutoUpdate => f.no_auto_update,
             Group::Auth => true,
             Group::Recover => f.auto_recover,
@@ -158,6 +170,31 @@ const MULTI_CHART_UNLOCK: &str = "(function(){try{var n=0;(function p(){var c=wi
 /// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
 #[cfg(test)]
 const STUDY_ON_STUDY_UNLOCK: &str = "(function(){try{var n=0;(function p(){var ok=!1;try{var c=Object.keys(window).filter(function(k){return /webpackChunk/i.test(k)});if(c.length){var rq=null;window[c[0]].push([[Date.now()%1e6],{},function(r){rq=r}]);if(typeof rq=='function'){for(var ids=Object.keys(rq.m),i=0;i<ids.length;i++){var s=String(rq.m[ids[i]]);if(!(s.indexOf('child_limit')>=0&&s.indexOf('getConfig:')>=0))continue;var m=rq(ids[i]);if(!m||typeof m.getConfig!='function')continue;var f=m.getConfig('STUDY_ON_STUDY');if(f&&typeof f=='object'){f.child_limit=99;ok=!0;break}}}}}catch(e){}if(!(ok||n>120)){n++;setTimeout(p,1e3)}})()}catch(e){}})();";
+
+/// 注入到图表页（dom-ready 后轮询执行）的绘图数量上限解锁脚本。
+///
+/// 实测链路（CDP、登录态 free 账号、把 `Debugger.searchInContent` 打到
+/// `static.tradingview.com/static/bundles/2958.*.js`）：
+///   - 上限来源：`drawingsPerChartLimit()` 读计划配置表的
+///     `DRAWINGS_ON_CHART.limit`（free 档 30），`>= UNLIMITED` 或 `undefined` 视为不限；
+///   - 执法方：`ensureDrawingsLimitAllowed(limitObj, delta, source)` 的第一条就是
+///     `limitObj===null || delta===0` 直接放行，否则才比 `counter.count()+delta <= limit`，
+///     超了就 `trackEvent("Gopro Features","Drawings Limit")` + `openPaywall(PAYWALL_DRAWINGS_LIMIT)`；
+///   - 调用点覆盖手绘 / 复制粘贴 / 克隆 / 图片拖入，全部走同一个执法函数。
+///
+/// 所以把「那个 limit 对象」变成 null 就等于全路径放行——比改计划表更稳（不动共享配置，
+/// 不依赖 webpack 模块 id）。实测：改写后带 actionSource 连续建线，30 → 42 条不弹付费墙。
+///
+/// **只改 `chartModel` 自身的 `drawingsLimit`**：它和 `_checkProFeature` 一样是页面里
+/// 每个图表实例共用的方法，实例级 + 原型级各打一次，后者保证同页后续新建的图表也生效。
+/// 轮询到图表实例出现为止（最多约 2 分钟），拿不到就静默放弃——宁可没解锁，也不能报错。
+///
+/// **已知未验证项**：超过 30 条能否被服务端存档。客户端这道闸门拆了之后画得出来，
+/// 但布局保存是否也放行没有证据（测试环境里用 API 建的线本就不进 storage 同步，
+/// 无法据此判断）。所以这个开关默认开，但文档里明确写清"删图立即释放、超额存档未验证"。
+/// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
+#[cfg(test)]
+const DRAWINGS_UNLOCK: &str = "(function(){try{if(window.__tvxDraw)return;window.__tvxDraw=1;var n=0,NO=function(){return null};function ok(){try{var c=window._exposed_chartWidgetCollection,aw=c&&c.activeChartWidget,w=aw&&typeof aw.value=='function'?aw.value():null,m=w&&typeof w.model=='function'?w.model():null,raw=m&&typeof m.model=='function'?m.model():null;if(!raw)return 0;try{if(typeof raw.drawingsLimit=='function')raw.drawingsLimit=NO}catch(e){}try{var pr=Object.getPrototypeOf(raw);if(pr&&typeof pr.drawingsLimit=='function')pr.drawingsLimit=NO}catch(e){}try{return typeof raw.drawingsLimit=='function'&&null===raw.drawingsLimit()?1:0}catch(e){return 0}}catch(e){return 0}}function p(){if(ok()||n>120)return;n++;setTimeout(p,1e3)}p()}catch(e){}})();";
 
 /// 注入到图表页的断线自愈脚本（单引号书写：整串要嵌在 `executeJavaScript("…")` 里）。
 /// 逻辑：发现「连接已关闭 / 恢复连接」类弹窗 → 先点「恢复连接 / Reconnect」；
@@ -323,6 +360,17 @@ pub const PATCHES: &[Patch] = &[
         //（整串已在登录态真实页面实弹验证：getConfig/featureLimit 同步联动返回 99）。
         old: "handleDomReadyForNonLocalFiles(){(0,u.Ow)().debug(",
         new: "handleDomReadyForNonLocalFiles(){this.executeJavaScript(\"(function(){try{var n=0;(function p(){var ok=!1;try{var c=Object.keys(window).filter(function(k){return /webpackChunk/i.test(k)});if(c.length){var rq=null;window[c[0]].push([[Date.now()%1e6],{},function(r){rq=r}]);if(typeof rq=='function'){for(var ids=Object.keys(rq.m),i=0;i<ids.length;i++){var s=String(rq.m[ids[i]]);if(!(s.indexOf('child_limit')>=0&&s.indexOf('getConfig:')>=0))continue;var m=rq(ids[i]);if(!m||typeof m.getConfig!='function')continue;var f=m.getConfig('STUDY_ON_STUDY');if(f&&typeof f=='object'){f.child_limit=99;ok=!0;break}}}}}catch(e){}if(!(ok||n>120)){n++;setTimeout(p,1e3)}})()}catch(e){}})();\").catch((()=>{})),(0,u.Ow)().debug(",
+    },
+    Patch {
+        name: "绘图数量解锁注入（客户端 gate）",
+        name_en: "Drawings-per-chart unlock injection (client gate)",
+        group: Group::Drawings,
+        // 锚点选在 handleDomReadyForNonLocalFiles 的收尾（`allowTitleUpdate` 之后、
+        // 提示音开关之前）——这条链上「多图表」用 insertCSS 那段、「指标叠加」用函数首语句，
+        // 三处互不重叠，任一条不开都不影响其余两条命中。
+        // 注入脚本把图表模型的 drawingsLimit() 打空（null 是执法函数的直接放行条件）。
+        old: "this.allowTitleUpdate(),Ge().allowAlertNotificationsSoundOnce()",
+        new: "this.allowTitleUpdate(),this.executeJavaScript(\"(function(){try{if(window.__tvxDraw)return;window.__tvxDraw=1;var n=0,NO=function(){return null};function ok(){try{var c=window._exposed_chartWidgetCollection,aw=c&&c.activeChartWidget,w=aw&&typeof aw.value=='function'?aw.value():null,m=w&&typeof w.model=='function'?w.model():null,raw=m&&typeof m.model=='function'?m.model():null;if(!raw)return 0;try{if(typeof raw.drawingsLimit=='function')raw.drawingsLimit=NO}catch(e){}try{var pr=Object.getPrototypeOf(raw);if(pr&&typeof pr.drawingsLimit=='function')pr.drawingsLimit=NO}catch(e){}try{return typeof raw.drawingsLimit=='function'&&null===raw.drawingsLimit()?1:0}catch(e){return 0}}catch(e){return 0}}function p(){if(ok()||n>120)return;n++;setTimeout(p,1e3)}p()}catch(e){}})();\").catch((()=>{})),Ge().allowAlertNotificationsSoundOnce()",
     },
     Patch {
         name: "登录回调直达发起实例",
@@ -902,6 +950,22 @@ mod tests {
     }
 
     #[test]
+    fn drawings_injection_matches_const() {
+        // 绘图数量解锁脚本与补丁字面文本逐字一致；整串嵌在 executeJavaScript("…") 里，
+        // 内部不得出现双引号（否则会提前闭合外层字符串）。
+        let d = PATCHES
+            .iter()
+            .find(|p| p.group == Group::Drawings)
+            .expect("绘图数量补丁应在补丁集里");
+        assert!(d.new.contains(DRAWINGS_UNLOCK));
+        assert!(!DRAWINGS_UNLOCK.contains('"'));
+        // 锚点不得与其他补丁重复（重复会让先打上的那条吃掉另一条的锚点）
+        for other in PATCHES.iter().filter(|p| p.name != d.name) {
+            assert_ne!(other.old, d.old, "绘图数量锚点与 {} 重复", other.name);
+        }
+    }
+
+    #[test]
     fn disconnect_recovery_injection_matches_const() {
         // 断线自愈脚本与补丁字面文本必须逐字一致；且整串要嵌在双引号里，
         // 因此脚本内部不得出现双引号（否则会提前闭合 executeJavaScript("…")）。
@@ -1168,6 +1232,7 @@ mod tests {
             ads_block: false,
             charts_unlock: false,
             study_on_study: false,
+            drawings_unlock: false,
             silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
@@ -1196,6 +1261,7 @@ mod tests {
             ads_block: false,
             charts_unlock: true,
             study_on_study: false,
+            drawings_unlock: false,
             silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
@@ -1385,6 +1451,7 @@ mod tests {
             ads_block: false,
             charts_unlock: false,
             study_on_study: false,
+            drawings_unlock: false,
             silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,

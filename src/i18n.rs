@@ -64,6 +64,8 @@ pub struct S {
     pub cb_charts_hint: &'static str,
     pub cb_study: &'static str,
     pub cb_study_hint: &'static str,
+    pub cb_drawings: &'static str,
+    pub cb_drawings_hint: &'static str,
     pub cb_silence: &'static str,
     pub cb_silence_hint: &'static str,
     pub cb_recover: &'static str,
@@ -153,6 +155,8 @@ static ZH: S = S {
     cb_charts_hint: "客户端 gate：free 档上限 1，注入后放行",
     cb_study: "指标叠加解锁",
     cb_study_hint: "客户端 gate：子指标上限 free 档 1，注入后放大",
+    cb_drawings: "绘图不限（单图 30）",
+    cb_drawings_hint: "客户端 gate：free 档单张图表上限 30 个绘图（隐藏/锁定的也算，删除立即释放），注入后不再拦。超额能否存到服务端档案尚未实测",
     cb_silence: "屏蔽充值窗口",
     cb_silence_hint: "不再弹出充值窗口",
     cb_recover: "断线自动恢复",
@@ -238,6 +242,8 @@ static EN: S = S {
     cb_charts_hint: "Client-side gate: free tier allows 1; the injection lifts it",
     cb_study: "Study-on-study",
     cb_study_hint: "Client-side gate: free tier child limit 1; the injection raises it",
+    cb_drawings: "Unlimited drawings",
+    cb_drawings_hint: "Client-side gate: free tier caps one chart at 30 drawings (hidden/locked ones count, deleting frees a slot); the injection stops the check. Whether the server keeps more than 30 in a saved layout is not yet verified",
     cb_silence: "Block billing popups",
     cb_silence_hint: "Hide billing popups",
     cb_recover: "Auto-recover on disconnect",
@@ -472,6 +478,7 @@ impl Lang {
         ads: bool,
         charts: bool,
         study: bool,
+        drawings: bool,
         silence: bool,
         no_update: bool,
     ) -> String {
@@ -487,12 +494,13 @@ impl Lang {
             (_, false) => "照常",
         };
         let head = match self {
-            Lang::Zh => "开关：广告拦截 {ads} · 多图表 {charts} · 指标叠加 {study} · 屏蔽充值窗口 {silence} · 自动更新 {upd}",
-            Lang::En => "Options: ads {ads} · charts {charts} · study {study} · block billing popups {silence} · auto-update {upd}",
+            Lang::Zh => "开关：广告拦截 {ads} · 多图表 {charts} · 指标叠加 {study} · 绘图不限 {draw} · 屏蔽充值窗口 {silence} · 自动更新 {upd}",
+            Lang::En => "Options: ads {ads} · charts {charts} · study {study} · drawings {draw} · block billing popups {silence} · auto-update {upd}",
         };
         head.replace("{ads}", st(ads))
             .replace("{charts}", st(charts))
             .replace("{study}", st(study))
+            .replace("{draw}", st(drawings))
             .replace("{silence}", st(silence))
             .replace("{upd}", upd)
     }
