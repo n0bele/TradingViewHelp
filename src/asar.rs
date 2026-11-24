@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn extract_real_asar() {
         let candidates = [
-            r"C:\Program Files\WindowsApps\TradingView.Desktop_3.5.0.8375_x64__n534cwy3pjxzj\resources\app.asar",
+            r"C:\Program Files\WindowsApps\TradingView.Desktop_3.5.1.8500_x64__n534cwy3pjxzj\resources\app.asar",
         ];
         let Some(asar) = candidates.iter().map(Path::new).find(|p| p.is_file()) else {
             eprintln!("跳过：没有可用的 app.asar");

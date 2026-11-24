@@ -1,6 +1,6 @@
 [package]
 name = "tvhelper"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "TVHelper - TradingView 多账号助手（本地补丁 + 独立配置目录 / local patches + per-account profiles）"
 

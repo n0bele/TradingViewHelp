@@ -609,12 +609,43 @@ fn chrono_like_now() -> String {
     format!("{h:02}:{m:02}:{s:02}Z")
 }
 
+/// 同一条回调在极短时间内被投递两次是很常见的：系统协议投递一次，
+/// 接管脚本从被商店版截走的进程里再捞一次。两次都转发会让同一个实例
+/// 连着处理两遍登录参数（重复开标签页、把登录态写两遍，严重时把实例顶掉）。
+///
+/// 只按完整 URL（含 token）做短时去重：不同账号的 token 必然不同，不会互相顶。
+fn auth_duplicate(url: &str, now: u64) -> bool {
+    use std::sync::{Mutex, OnceLock};
+
+    static LAST: OnceLock<Mutex<Option<(String, u64)>>> = OnceLock::new();
+    /// 窗口取 20 秒：够盖住"系统投递 + 接管捞回"的间隔，又不至于挡住用户
+    /// 立刻重试同一条链接。
+    const WINDOW_SECS: u64 = 20;
+
+    let mutex = LAST.get_or_init(|| Mutex::new(None));
+    let mut last = match mutex.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    if let Some((prev, at)) = last.as_ref() {
+        if prev == url && now.saturating_sub(*at) < WINDOW_SECS {
+            return true;
+        }
+    }
+    *last = Some((url.to_string(), now));
+    false
+}
+
 /// 深链分发：系统把 `tradingview://` 交给 `tvx _auth`，这里广播给所有在跑的实例。
 ///
 /// 每个实例用自己的 `--user-data-dir` 起一个短命进程转发 URL——Electron 的单实例锁
 /// 会把参数投递给该 profile 的主进程；正在等登录的那个实例会处理，其余会忽略。
 pub fn route_auth(url: &str) {
     auth_log(&format!("收到回调：{}", mask_token(url)));
+    if auth_duplicate(url, now_secs()) {
+        auth_log("  同一条回调刚处理过，忽略这次重复投递");
+        return;
+    }
 
     // 回调 URL 里的 token 是本次登录的凭据：解出 user_id 就能把"这个档案登录了哪个账号"
     // 记下来。只能记到**一个**档案头上——广播式投递会让几个账号一起被换成同一个号。
@@ -870,6 +901,16 @@ fn capture_handoff(secs: u32) -> Option<(u32, String)> {
 /// 几十个轮询进程（每个都在查进程命令行），表现为"命令行窗口一直在闪"。
 static HANDOFF_WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 这个 pid 是不是我们正在用的实例（按 PID 文件校验过启动时间）。
+///
+/// 接管脚本的判据只有"命令行里有 `tradingview://browser-auth`"。用户从浏览器
+/// 点登录时，系统会**带着这个 URL 再拉起一个 TradingView.exe**——如果它在抢单实例
+/// 锁之前被当成"被商店版截走的转发进程"杀掉，用户看到的就是客户端莫名其妙退出、
+/// 再被拉起来、又被杀掉，也就是"一直在重启"。
+fn is_managed_instance(pid: u32) -> bool {
+    list().into_iter().any(|p| running_pid(&p) == Some(pid))
+}
+
 /// 登录期间调用：抓一次被抢走的回调并转发给我们的实例。
 pub fn spawn_handoff_watcher(ctx: eframe::egui::Context) {
     use std::sync::atomic::Ordering;
@@ -881,7 +922,11 @@ pub fn spawn_handoff_watcher(ctx: eframe::egui::Context) {
             route_auth(&url);
             auth_log(&format!("已接管被抢走的授权回调（PID {pid}）"));
             if pid != 0 {
-                let _ = stop(pid);
+                if is_managed_instance(pid) {
+                    auth_log("  该进程是我们正在用的实例，只转发不结束");
+                } else {
+                    let _ = stop(pid);
+                }
             }
             ctx.request_repaint();
         }
@@ -895,7 +940,7 @@ pub fn capture_handoff_once(secs: u32) -> Option<(u32, String)> {
     if let Some((pid, url)) = &got {
         route_auth(url);
         auth_log(&format!("手动接管回调（PID {pid}）"));
-        if *pid != 0 {
+        if *pid != 0 && !is_managed_instance(*pid) {
             let _ = stop(*pid);
         }
     }
@@ -925,6 +970,21 @@ pub struct Launched {
 pub fn launch(managed: &Managed, profile: &Profile, lang: Lang) -> Result<Launched> {
     if let Some(pid) = running_pid(profile) {
         return Ok(Launched { pid, warning: None });
+    }
+
+    // 启动前先体检。客户端的日志目录固定建在 `%APPDATA%\TradingView\logs`，
+    // 而 `%APPDATA%` / `%USERPROFILE%` 指向不存在的目录时，它会以
+    // `ENOENT: mkdir '…\logging'` 崩在启动阶段（栈里只有 mkdirSync/initializeWrite）。
+    // 那种崩溃框看不出原因，所以在这里拦住并说人话。
+    let problems = crate::install::environment_problems();
+    if !problems.is_empty() {
+        let detail = problems
+            .iter()
+            .map(|p| p.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("；");
+        crate::install::log_error("启动前环境检查", &detail);
+        bail!("{detail}");
     }
 
     // 同账号多开：老版本在这里直接拒绝，理由是"服务端按账号限制并发连接"。
@@ -1079,6 +1139,19 @@ mod tests {
         );
         // 没有目标、也没有实例：不投
         assert_eq!(pick_auth_target(None, &[("/a", false)], 200), None);
+    }
+
+    /// 同一条回调被投递两次是常态（系统一次 + 接管脚本捞回一次）。
+    /// 不去重的话同一个实例会连着处理两遍登录参数，严重时把实例顶掉重启。
+    #[test]
+    fn duplicate_auth_callback_is_ignored() {
+        let u = "tradingview://dedup-test/?token=t1";
+        assert!(!auth_duplicate(u, 10_000), "第一次必须放行");
+        assert!(auth_duplicate(u, 10_001), "1 秒后的同一条必须拦住");
+        assert!(auth_duplicate(u, 10_019), "19 秒内仍然算重复");
+        assert!(!auth_duplicate(u, 10_021), "过了 20 秒窗口应重新放行");
+        // token 不同的回调互不影响
+        assert!(!auth_duplicate("tradingview://dedup-test/?token=t2", 10_022));
     }
 
     /// 目标文件格式：第一行目录，第二行写入时间（旧格式只有一行，按"现在"算）

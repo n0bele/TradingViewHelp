@@ -21,6 +21,23 @@ fn main() -> eframe::Result<()> {
         app::reapply_headless();
         return Ok(());
     }
+    // 无头构建：tvhelper _build —— 从系统安装构建/重建托管副本（优先已验证版本）
+    if args.iter().any(|a| a == "_build") {
+        app::build_headless();
+        return Ok(());
+    }
+    // 环境自检：tvhelper _doctor —— 打印用户目录/AppData/副本补丁/账号列表，
+    // 并把同一份报告写到 ~/.tvx/doctor.txt。客户端崩在启动阶段时先跑它。
+    if args.iter().any(|a| a == "_doctor") {
+        let report = install::doctor_report();
+        print!("{report}");
+        let path = install::tvx_root().join("doctor.txt");
+        match std::fs::write(&path, &report) {
+            Ok(()) => println!("报告已写入 {}", path.display()),
+            Err(e) => println!("报告写入失败：{e}"),
+        }
+        return Ok(());
+    }
     // 深链分发：`tvhelper _auth tradingview://...`
     if args.iter().any(|a| a == "_auth") {
         if let Some(url) = args.iter().find(|a| a.starts_with("tradingview://")) {

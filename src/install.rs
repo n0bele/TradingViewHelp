@@ -256,6 +256,185 @@ pub fn managed_root() -> PathBuf {
     tvx_root().join("apps")
 }
 
+// ---------------------------------------------------------------- 启动前环境体检
+
+/// 一项环境检查的结果。
+///
+/// 存在的意义：客户端在 `%APPDATA%` 缺失时会以
+/// `ENOENT: no such file or directory, mkdir '…\AppData\Roaming\TradingView\logs'`
+/// 崩在启动阶段（栈里只有 mkdirSync/initializeWrite，看不出是环境问题）。
+/// 与其让用户对着一句英文崩溃框猜，不如启动前就查出来，用人话拦住。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvProblem {
+    /// 稳定标识（日志/测试用，不翻译）
+    pub key: &'static str,
+    /// 面向用户的一句话（已带具体路径）
+    pub detail: String,
+}
+
+impl EnvProblem {
+    fn new(key: &'static str, detail: String) -> Self {
+        Self { key, detail }
+    }
+}
+
+/// 检查一个"必须存在且是目录"的环境变量；返回它的值（无论对错）供后续比对。
+fn check_env_dir(
+    out: &mut Vec<EnvProblem>,
+    key: &'static str,
+    var: &str,
+) -> Option<PathBuf> {
+    match std::env::var_os(var) {
+        Some(v) if v.is_empty() => {
+            out.push(EnvProblem::new(key, format!("环境变量 {var} 为空")));
+            None
+        }
+        Some(v) => {
+            let p = PathBuf::from(&v);
+            if !p.is_dir() {
+                out.push(EnvProblem::new(
+                    key,
+                    format!("{var} 指向的目录不存在：{}", p.display()),
+                ));
+            }
+            Some(p)
+        }
+        None => {
+            out.push(EnvProblem::new(key, format!("缺少环境变量 {var}")));
+            None
+        }
+    }
+}
+
+/// 启动前的环境自查。返回空 = 正常；非空 = 一条条人话，直接可以给用户看。
+pub fn environment_problems() -> Vec<EnvProblem> {
+    let mut out = Vec::new();
+
+    // 1) 用户目录与 AppData。Windows 上客户端固定用 `%APPDATA%\TradingView\logs`，
+    //    父目录不存在时 mkdir 报 ENOENT（不是权限问题，EACCES 才是）；
+    //    macOS/Linux 走 `$HOME`，没有这两个变量是正常现象，不能当错误报。
+    #[cfg(windows)]
+    let profile = check_env_dir(&mut out, "no-userprofile", "USERPROFILE");
+    #[cfg(windows)]
+    let _appdata = check_env_dir(&mut out, "no-appdata", "APPDATA");
+    #[cfg(not(windows))]
+    let profile = check_env_dir(&mut out, "no-home-var", "HOME");
+
+    #[cfg(windows)]
+    if let Some(p) = &profile {
+        let roaming = p.join("AppData").join("Roaming");
+        if p.is_dir() && !roaming.is_dir() {
+            out.push(EnvProblem::new(
+                "broken-profile",
+                format!(
+                    "用户配置不完整：{} 里没有 AppData\\Roaming（客户端会在建 logs 目录时崩溃）",
+                    p.display()
+                ),
+            ));
+        }
+    }
+
+    // 2) ~ 的解析结果和 USERPROFILE 不一致：账号会被建到另一个地方，
+    //    表现是"重启后账号不见了"或"两个界面看到的账号不一样"。
+    match (dirs::home_dir(), &profile) {
+        (Some(h), Some(u)) if h != *u => out.push(EnvProblem::new(
+            "home-mismatch",
+            format!(
+                "用户目录解析不一致：home_dir={} 但 USERPROFILE={}",
+                h.display(),
+                u.display()
+            ),
+        )),
+        (None, _) => out.push(EnvProblem::new(
+            "no-home",
+            "无法确定用户目录（home_dir 为空），配置会落到当前工作目录".to_string(),
+        )),
+        _ => {}
+    }
+
+    // 3) 配置目录必须可建可写：PID/登录去重/开关都落在里面，写不上等于功能全废。
+    let root = tvx_root();
+    if let Err(e) = fs::create_dir_all(&root) {
+        out.push(EnvProblem::new(
+            "root-unwritable",
+            format!("配置目录无法创建：{}（{e}）", root.display()),
+        ));
+    } else {
+        let probe = root.join(".write-probe");
+        match fs::write(&probe, b"1") {
+            Ok(_) => {
+                let _ = fs::remove_file(&probe);
+            }
+            Err(e) => out.push(EnvProblem::new(
+                "root-unwritable",
+                format!("配置目录不可写：{}（{e}）", root.display()),
+            )),
+        }
+    }
+
+    out
+}
+
+/// 一行行拼好的环境报告（`_doctor` 与界面「自检」共用）。
+pub fn doctor_report() -> String {
+    let mut s = String::new();
+    s.push_str("TVHelper 环境自检\n");
+    s.push_str(&format!("平台: {}\n", std::env::consts::OS));
+    #[cfg(windows)]
+    let vars = ["USERPROFILE", "APPDATA", "LOCALAPPDATA"];
+    #[cfg(not(windows))]
+    let vars = ["HOME", "XDG_CONFIG_HOME"];
+    for v in vars {
+        let val = std::env::var(v).unwrap_or_else(|_| "(未设置)".into());
+        let ok = std::env::var_os(v)
+            .map(|p| PathBuf::from(p).is_dir())
+            .unwrap_or(false);
+        s.push_str(&format!("{v}: {val} [{}]\n", if ok { "存在" } else { "不存在" }));
+    }
+    let home = dirs::home_dir();
+    s.push_str(&format!(
+        "home_dir: {}\n",
+        home.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(空)".into())
+    ));
+    s.push_str(&format!("配置目录: {}\n", tvx_root().display()));
+    s.push_str(&format!("托管副本: {}\n", managed_root().display()));
+
+    let probs = environment_problems();
+    if probs.is_empty() {
+        s.push_str("环境检查: 通过\n");
+    } else {
+        s.push_str(&format!("环境检查: {} 项异常\n", probs.len()));
+        for p in &probs {
+            s.push_str(&format!("  ! [{}] {}\n", p.key, p.detail));
+        }
+    }
+
+    let list = crate::profiles::list();
+    s.push_str(&format!("账号: {} 个\n", list.len()));
+    for p in &list {
+        s.push_str(&format!(
+            "  - {} -> {} [{}]\n",
+            p.name,
+            p.dir.display(),
+            if p.dir.is_dir() { "存在" } else { "不存在" }
+        ));
+    }
+    match load_managed() {
+        Some(m) => {
+            s.push_str(&format!("副本版本: {}\n", m.version));
+            s.push_str(&format!(
+                "副本 exe: {}\n",
+                m.exe().map(|p| p.display().to_string()).unwrap_or_else(|| "(缺失)".into())
+            ));
+            let cfg = load_config();
+            let ok = patch::is_patched(&m.index_js(), &cfg.flags());
+            s.push_str(&format!("补丁: {}\n", if ok { "完整" } else { "不完整（有开关对应的补丁缺失）" }));
+        }
+        None => s.push_str("副本: 未构建\n"),
+    }
+    s
+}
+
 /// 原子写：先写同目录临时文件再 rename。
 /// 直接 `fs::write` 覆盖时，断电/崩溃会留下半截 JSON —— 配置或 PID 直接损坏，
 /// 而这两类文件恰好决定"开关是否生效"和"实例是否在跑"。
@@ -789,8 +968,12 @@ mod tests {
             kind: InstallKind::Custom,
             root: PathBuf::from("C:/nope").join(v),
         };
-        let all = vec![mk("3.5.0.8375"), mk("3.6.0.9000"), mk("custom")];
-        assert_eq!(preferred_index(&all), Some(0), "有已验证版本时选它");
+        let all = vec![
+            mk("3.6.0.9000"),
+            mk(patch::VERIFIED_VERSION),
+            mk("custom"),
+        ];
+        assert_eq!(preferred_index(&all), Some(1), "有已验证版本时选它");
 
         // 都不在白名单：退回版本号最大的那份（保持原有行为，仍可构建但会弹风险确认）
         let newer_only = vec![mk("3.6.0.9000"), mk("3.5.0.8375.1")];

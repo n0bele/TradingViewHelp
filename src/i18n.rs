@@ -53,6 +53,10 @@ pub struct S {
     pub copy_newer: &'static str,
     pub copy_newer_hint: &'static str,
     pub btn_rebuild: &'static str,
+    /// 环境体检不通过时的顶栏提示（启动会被阻止）
+    pub env_warn: &'static str,
+    /// 「自检」按钮：重跑体检并把完整报告写进日志
+    pub btn_doctor: &'static str,
     pub features: &'static str,
     pub cb_ads: &'static str,
     pub cb_ads_hint: &'static str,
@@ -140,6 +144,8 @@ static ZH: S = S {
     copy_newer: "· 发现新版 {v}（已验证）",
     copy_newer_hint: "系统里的 TradingView 已升到 {v}，该版本在白名单里，重建副本后仍是完整支持的状态；不重建也能继续用当前副本",
     btn_rebuild: "重建副本",
+    env_warn: "环境异常，启动会被阻止：",
+    btn_doctor: "自检",
     features: "功能",
     cb_ads: "拦截广告/追踪网络",
     cb_ads_hint: "网络层拦掉广告与追踪域名",
@@ -174,7 +180,7 @@ static ZH: S = S {
     chk_allow_unverified: "我了解风险，仍要用该版本构建副本",
     btn_rebuild_anyway: "仍要重建（未验证）",
     copy_newer_unverified: "· 发现新版 {v}（未验证，不建议升级副本）",
-    copy_newer_unverified_hint: "系统里的 TradingView 已升到 {v}，但补丁锚点是按 3.5.0.8375 提取的，新版 JS 的压缩标识符很可能已变化。当前副本自包含，客户端升级不会影响它，可以继续用；除非有明确需要，不必重建。",
+    copy_newer_unverified_hint: "系统里的 TradingView 已升到 {v}，但补丁锚点是按 {refv} 提取的，新版 JS 的压缩标识符很可能已变化。当前副本自包含，客户端升级不会影响它，可以继续用；除非有明确需要，不必重建。",
     log: "日志",
     clear: "清空",
     accounts: "账号",
@@ -223,6 +229,8 @@ static EN: S = S {
     copy_newer: "· newer {v} found (verified)",
     copy_newer_hint: "The installed TradingView is now {v}, which is on the verified list; rebuilding keeps full support. Keeping the current copy works too",
     btn_rebuild: "Rebuild copy",
+    env_warn: "Environment problem, launching is blocked:",
+    btn_doctor: "Self-check",
     features: "Features",
     cb_ads: "Block ads & trackers",
     cb_ads_hint: "Cancel ad/tracking domains at the network layer",
@@ -257,7 +265,7 @@ static EN: S = S {
     chk_allow_unverified: "I understand the risk and want to build from this version anyway",
     btn_rebuild_anyway: "Rebuild anyway (unverified)",
     copy_newer_unverified: "· newer {v} found (unverified, not recommended)",
-    copy_newer_unverified_hint: "The installed TradingView is now {v}, but the anchors were extracted from 3.5.0.8375 and minified identifiers likely moved. The managed copy is self-contained, so a client update does not affect it - keep using it unless you have a real reason to rebuild.",
+    copy_newer_unverified_hint: "The installed TradingView is now {v}, but the anchors were extracted from {refv} and minified identifiers likely moved. The managed copy is self-contained, so a client update does not affect it - keep using it unless you have a real reason to rebuild.",
     log: "Log",
     clear: "Clear",
     accounts: "Accounts",
@@ -541,6 +549,20 @@ impl Lang {
         self.pick(
             "没有托管副本，先在界面里生成".into(),
             "No managed copy yet; build one in the GUI first".into(),
+        )
+    }
+
+    pub fn log_no_install_headless(&self) -> String {
+        self.pick(
+            "系统里没找到已安装的 TradingView，无法构建副本".into(),
+            "No installed TradingView found; cannot build a copy".into(),
+        )
+    }
+
+    pub fn log_built_headless(&self, version: &str, path: &str) -> String {
+        self.pick(
+            format!("● 已按 {version} 构建托管副本：{path}"),
+            format!("● Managed copy built from {version}: {path}"),
         )
     }
 

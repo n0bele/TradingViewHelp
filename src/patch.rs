@@ -13,7 +13,7 @@
 //! `getConfig('STUDY_ON_STUDY')` 返回渲染进程内嵌计划配置表的共享对象
 //! （free 档 limit:800 / child_limit:1），执法方 `canCreateStudy` 经
 //! `featureLimit` 活读取该表，改写共享表后 featureLimit 实测联动放行——可注入解除。
-//! 自动更新只有启动链一处自动触发（`tp().checkForUpdates()` 唯一入口；
+//! 自动更新只有启动链一处自动触发（`op().checkForUpdates()` 唯一入口；
 //! 断链后 `appInstaller` 恒空，`setupUpdatesMonitoring` 双重保险使更新定时器
 //! 永不建立），`checkForUpdatesAndNotify` 全 bundle 仅定义未调用；
 //! 设置面板的手动检查/下载路径不受影响。
@@ -24,19 +24,23 @@ use std::path::Path;
 
 /// 补丁锚点所针对、并做过端到端实测验证的 TradingView Desktop 版本。
 /// 锚点是 index.js 里的字面代码片段（压缩标识符随版本漂移，效果等同"偏移不同"），
-/// 其他版本不保证命中——apply() 在失配时显式失败并指出是哪条补丁没对上，
+/// 其他版本不保证命中——apply() 在失配时把该条标成未生效并指出是哪条没对上，
 /// 绝不静默打一半；界面（app.rs）会把该版本标注在副本状态旁。
-pub const VERIFIED_VERSION: &str = "3.5.0.8375";
-
-/// 已验证版本白名单（当前只有一条真实样本，所以只有一个版本）。
+///
+/// **锚点只跟这一个版本对齐**。3.5.1.8500 相对 3.5.0.8375 只是重排了压缩标识符
+/// （`vL` / `Le.Qh` / `$C.xE` / `Zu` / `op`）并把 `handleDomReady` 里的 URL 判断
+/// 写成 `""!==this.url`，结构性代码没动。维护两张版本表没有收益：托管副本是按
+/// 版本目录隔离的自包含拷贝，旧副本建好就不用再重打，跟着新版本走即可。
 ///
 /// **这就是"版本锁"的唯一事实来源**：托管副本 `~/.tvx/apps/<version>/` 是按目录名
-/// 存在的，一旦在 3.5.0.8375 上构建成功，它是一份自包含的拷贝——客户端以后自动
-/// 升级到新版也不会改动这份副本，所以副本本身就是锁。
+/// 存在的，一旦在这个版本上构建成功，它是一份自包含的拷贝——客户端以后自动升级到
+/// 新版也不会改动这份副本，所以副本本身就是锁。
 ///
-/// 新版本要进这张表，必须真的拿该版本的 `resources/app/index.js` 跑通全部锚点
-/// （`apply()` 全绿、并实机登录一次），不能凭"看起来差不多"加进来。加进来之后
-/// 界面才会把它当作默认构建源、才不再显示"未验证"警告。
+/// 换版本时必须真的拿该版本的 `resources/app/index.js` 跑通全部锚点
+/// （`apply()` 全绿、并实机登录一次），不能凭"看起来差不多"改数字。
+pub const VERIFIED_VERSION: &str = "3.5.1.8500";
+
+/// 已验证版本白名单（只有当前对齐的这一版）。
 pub const VERIFIED_VERSIONS: &[&str] = &[VERIFIED_VERSION];
 
 /// 该客户端版本是否属于已验证版本（决定默认选源、是否弹风险确认、是否标"未验证"）。
@@ -219,8 +223,11 @@ const PROMO_GUARD: &str = "(function(){try{if(window.__tvxGuard)return;window.__
 const DOM_READY_HEAD: &str =
     "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"";
 
-/// 被替换掉的原始锚点尾巴（恢复功能关闭时回退到这里）
-const OLD_RECOVER_ANCHOR: &str = "\").catch((()=>{})),this.url&&";
+/// `handleDomReady` 段的两块稳定边界文本：注入脚本之后固定是 `").catch((()=>{}))`，
+/// 再接 URL 判断；判断各版本写法不同（`this.url&&` / `""!==this.url&&`），但都以
+/// `this.url&&` 收尾。所以段尾只要认这两块，不必按版本枚举。
+const RECOVER_SCRIPT_TAIL: &str = "\").catch((()=>{})),";
+const RECOVER_URL_TAIL: &str = "this.url&&";
 
 /// 「页内推广浮层」注入段的边界：`.on("dom-ready",…executeJavaScript("` 到 `").catch((()=>{}))}))`。
 /// 脚本本体每升级一次（v1 轮询点关闭 → v2 插入即拦）文本就全变，靠 old 精确匹配必然失配，
@@ -246,22 +253,22 @@ pub const PATCHES: &[Patch] = &[
         name: "订阅遮罩窗口不再创建",
         name_en: "Paywall overlay window not created",
         group: Group::Silence,
-        old: "async function nk(e,t){const n=(0,Pe.Qh)().getLastFocusedWindow();",
-        new: "async function nk(e,t){return;const n=(0,Pe.Qh)().getLastFocusedWindow();",
+        old: "async function vL(e,t){const n=(0,Le.Qh)().getLastFocusedWindow();",
+        new: "async function vL(e,t){return;const n=(0,Le.Qh)().getLastFocusedWindow();",
     },
     Patch {
         name: "showPaywall 变空操作",
         name_en: "showPaywall becomes a no-op",
         group: Group::Silence,
-        old: "showPaywall(e,t){return nk(e,t)}",
+        old: "showPaywall(e,t){return vL(e,t)}",
         new: "showPaywall(e,t){return Promise.resolve()}",
     },
     Patch {
         name: "网页内充值窗口不再注入",
         name_en: "In-page billing popup not injected",
         group: Group::Silence,
-        old: "async requestProFeature(){const e=(0,Pe.Qh)().getLastFocusedWindow();",
-        new: "async requestProFeature(){return;const e=(0,Pe.Qh)().getLastFocusedWindow();",
+        old: "async requestProFeature(){const e=(0,Le.Qh)().getLastFocusedWindow();",
+        new: "async requestProFeature(){return;const e=(0,Le.Qh)().getLastFocusedWindow();",
     },
     Patch {
         name: "页面请求开窗时拦截充值/推广链接",
@@ -293,8 +300,8 @@ pub const PATCHES: &[Patch] = &[
         // 挂在既有 initSession 的 webRequest 配置处（onBeforeSendHeaders 之后，
         // will-download 注册之前）。实测当前图表页无广告 DOM，此为预防性网络层拦截，
         // 命中第三方广告网络（Google Ads 系/Taboola/Outbrain 等常见买量网络）时直接取消。
-        old: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.on(\"will-download\",$u)",
-        new: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.webRequest.onBeforeRequest(((e,r)=>{r({cancel:/(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|googletagservices\\.com|adservice\\.google\\.|taboola\\.com|outbrain\\.com|amazon-adsystem\\.com|adsrvr\\.org|rubiconproject\\.com)/.test(e.url)})})),e.on(\"will-download\",$u)",
+        old: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.on(\"will-download\",Zu)",
+        new: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.webRequest.onBeforeRequest(((e,r)=>{r({cancel:/(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|googletagservices\\.com|adservice\\.google\\.|taboola\\.com|outbrain\\.com|amazon-adsystem\\.com|adsrvr\\.org|rubiconproject\\.com)/.test(e.url)})})),e.on(\"will-download\",Zu)",
     },
     Patch {
         name: "多图表布局解锁注入（客户端 gate）",
@@ -334,8 +341,8 @@ pub const PATCHES: &[Patch] = &[
         group: Group::Auth,
         // 登录走浏览器授权时，把生成的 URL 写进实例日志，
         // 便于确认浏览器到底打开了什么、有没有走完回调。
-        old: "async signInWithBrowser(){const e=this.createAuthenticationUrl();this.authStateSubject.next({stage:CE.xE.WaitingToken})",
-        new: "async signInWithBrowser(){const e=this.createAuthenticationUrl();console.log(\"TVX_AUTH_URL \"+e);this.authStateSubject.next({stage:CE.xE.WaitingToken})",
+        old: "async signInWithBrowser(){const e=this.createAuthenticationUrl();this.authStateSubject.next({stage:$C.xE.WaitingToken})",
+        new: "async signInWithBrowser(){const e=this.createAuthenticationUrl();console.log(\"TVX_AUTH_URL \"+e);this.authStateSubject.next({stage:$C.xE.WaitingToken})",
     },
     Patch {
         name: "登录改由助手打开无痕窗口",
@@ -357,8 +364,8 @@ pub const PATCHES: &[Patch] = &[
         // 之后按 15s/60s/5min 再试，最多 4 次，之后停手并让弹窗留着（把原因还给人）。
         // 连续 60 秒无弹窗则清零计数，避免用满次数后整个标签页不再自愈。
         // 这不改变服务端并发配额——配额在服务端强制，客户端没有可改的 gate。
-        old: "handleDomReady(){this.isBrowserViewValid()&&(this.url&&",
-        new: "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();\").catch((()=>{})),this.url&&",
+        old: "handleDomReady(){this.isBrowserViewValid()&&(\"\"!==this.url&&",
+        new: "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();\").catch((()=>{})),\"\"!==this.url&&",
     },
     Patch {
         name: "放宽离线判定超时",
@@ -380,8 +387,8 @@ pub const PATCHES: &[Patch] = &[
         // 插入恒真短路后 checkForUpdates 在任何平台都不会执行：appInstaller 永不填充，
         // setupUpdatesMonitoring 双重保险（if(!this.appInstaller)return）使更新定时器
         // 永不建立；设置面板手动检查/下载路径不受影响。Linux 官方原本就跳过自动更新。
-        old: "(0,M.j9)()||tp().checkForUpdates()",
-        new: "(0,M.j9)()||!0||tp().checkForUpdates()",
+        old: "(0,M.j9)()||op().checkForUpdates()",
+        new: "(0,M.j9)()||!0||op().checkForUpdates()",
     },
     Patch {
         name: "本地指标报警引擎",
@@ -440,9 +447,10 @@ impl ApplyReport {
     }
 }
 
-/// 压缩标识符（webpack 重打包后 `M.j9`、`nk` 这类名字会重排）的兜底锚点。
+/// 压缩标识符（webpack 重打包后 `M.j9`、`vL` 这类名字会重排）的兜底锚点。
 /// `{}` 表示"一个标识符"，按出现顺序回填到替换文本里；`from` 是未打补丁的形态，
-/// `to` 是打完的形态。字面锚点优先，只有精确匹配 0 处时才启用。
+/// `to` 是打完的形态。字面锚点优先，只有精确匹配 0 处时才启用——这样换版本时
+/// 只改 `old`/`new` 一处，兜底表不用跟着改。
 struct WildAnchor {
     patch: &'static str,
     from: &'static str,
@@ -466,9 +474,10 @@ const WILD_ANCHORS: &[WildAnchor] = &[
         to: "async requestProFeature(){return;const e=(0,{}.{})().getLastFocusedWindow();",
     },
     WildAnchor {
+        // 启动链里唯一一次自动检查；取用函数名（`tp`→`op`）也算标识符，一并通配。
         patch: "启动自动更新检查禁用",
-        from: "(0,{}.{})()||tp().checkForUpdates()",
-        to: "(0,{}.{})()||!0||tp().checkForUpdates()",
+        from: "(0,{}.{})()||{}().checkForUpdates()",
+        to: "(0,{}.{})()||!0||{}().checkForUpdates()",
     },
 ];
 
@@ -534,13 +543,16 @@ fn wild_expand(pat: &str, caps: &[&str]) -> String {
     out
 }
 
-/// 定位「断线自动恢复」注入段的字节区间：从 `DOM_READY_HEAD` 到 `OLD_RECOVER_ANCHOR`。
+/// 定位「断线自动恢复」注入段的字节区间：从 `DOM_READY_HEAD` 到 `this.url&&` 的末尾。
 /// 段的边界是稳定的（脚本本体怎么改都不影响），所以历史脚本可以按段整体替换，
-/// 不必为每一版都写一条 LEGACY 全文。
+/// 不必为每一版都写一条 LEGACY 全文；URL 判断换写法（`this.url` → `""!==this.url`）也不影响。
 fn recover_segment_range(src: &str) -> Option<(usize, usize)> {
     let start = src.find(DOM_READY_HEAD)?;
-    let tail = src[start..].find(OLD_RECOVER_ANCHOR)?;
-    Some((start, start + tail + OLD_RECOVER_ANCHOR.len()))
+    let body = start + DOM_READY_HEAD.len();
+    let close = body + src[body..].find(RECOVER_SCRIPT_TAIL)?;
+    let after = close + RECOVER_SCRIPT_TAIL.len();
+    let end = after + src[after..].find(RECOVER_URL_TAIL)? + RECOVER_URL_TAIL.len();
+    Some((start, end))
 }
 
 /// 定位「页内推广浮层」注入段的字节区间（PROMO_SEG_HEAD … PROMO_SEG_TAIL）。
@@ -592,7 +604,7 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
 
     // 0b) 「断线自动恢复」按段迁移：脚本本身会随版本演进（内存计数 → 会话存储 → 现在的
     //     首试不等 + 健康清零），每一版的注入文本都不一样，靠 old 精确匹配必然失配。
-    //     段的边界（DOM_READY_HEAD … OLD_RECOVER_ANCHOR）是稳定的，这里整段换成当前版本；
+    //     段的边界（DOM_READY_HEAD … RECOVER_URL_TAIL）是稳定的，这里整段换成当前版本；
     //     已是原始锚点或已是当前脚本时不动，交给下面的常规流程给出准确状态。
     if let Some(p) = PATCHES.iter().find(|p| p.group == Group::Recover) {
         match src.matches(DOM_READY_HEAD).count() {
@@ -947,8 +959,10 @@ mod tests {
                 legacy.starts_with(DOM_READY_HEAD),
                 "{name}：必须以 handleDomReady 段开头"
             );
+            // LEGACY 里的文本是历史版本写进副本的原样，段尾一律是 `this.url&&`
+            // （URL 判断换写法是后来的事），所以这里只校验稳定的那半截。
             assert!(
-                legacy.ends_with(OLD_RECOVER_ANCHOR),
+                legacy.ends_with(RECOVER_URL_TAIL),
                 "{name}：必须以原始锚点 this.url&& 结尾"
             );
             assert_eq!(
@@ -1090,13 +1104,17 @@ mod tests {
         }
 
         // 关：当前脚本 → 原始锚点
+        let recover = PATCHES
+            .iter()
+            .find(|p| p.group == Group::Recover)
+            .expect("断线自愈补丁应在补丁集里");
         let off = Flags {
             auto_recover: false,
             ..Flags::default()
         };
         apply(&f, &off).unwrap();
         let after = fs::read_to_string(&f).unwrap();
-        assert!(after.contains("handleDomReady(){this.isBrowserViewValid()&&(this.url&&"));
+        assert!(after.contains(recover.old), "关掉后应回到原始断点锚点");
         assert!(!after.contains(DISCONNECT_RECOVER));
 
         let _ = fs::remove_dir_all(&dir);
@@ -1377,8 +1395,8 @@ mod tests {
 
         // 模拟上游重打包：压缩标识符全改名，字面锚点失配，通配锚点应接住
         let drifted = pristine
-            .replace("nk(e,t)", "xQ(e,t)")
-            .replace("(0,Pe.Qh)()", "(0,Zz.Yy)()")
+            .replace("vL(e,t)", "xQ(e,t)")
+            .replace("(0,Le.Qh)()", "(0,Zz.Yy)()")
             .replace("(0,M.j9)()", "(0,Wq.r8)()");
         assert!(drifted.contains("xQ(e,t)"));
         fs::write(&idx, &drifted).unwrap();
@@ -1391,16 +1409,16 @@ mod tests {
         let text = fs::read_to_string(&idx).unwrap();
         assert!(text.contains("async function xQ(e,t){return;"));
         assert!(text.contains("showPaywall(e,t){return Promise.resolve()}"));
-        assert!(text.contains("(0,Wq.r8)()||!0||tp().checkForUpdates()"));
+        assert!(text.contains("(0,Wq.r8)()||!0||op().checkForUpdates()"));
 
         // 真·结构变化（锚点彻底不存在）只让该条失败，其余照打
-        let broken = pristine.replace("showPaywall(e,t){return nk(e,t)}", "showPaywallV2(){}");
+        let broken = pristine.replace("showPaywall(e,t){return vL(e,t)}", "showPaywallV2(){}");
         fs::write(&idx, &broken).unwrap();
         let fifth = apply(&idx, &on).unwrap();
         assert!(fifth.failed.iter().any(|f| f.contains("showPaywall")));
         assert!(!fifth.failed.iter().any(|f| f.contains("自动更新")));
         let text = fs::read_to_string(&idx).unwrap();
-        assert!(text.contains("(0,M.j9)()||!0||tp().checkForUpdates()"));
+        assert!(text.contains("(0,M.j9)()||!0||op().checkForUpdates()"));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -67,6 +67,28 @@ pub fn reapply_headless() {
     }
 }
 
+/// 无头构建：`tvhelper _build` —— 从系统安装（优先已验证版本）构建/重建托管副本。
+/// 与界面上的「构建副本」走同一条 install::build：客户端升级后不用点鼠标也能重建。
+pub fn build_headless() {
+    let cfg = install::load_config();
+    let lang = cfg.lang;
+    let installs = install::discover();
+    let Some(idx) = install::preferred_index(&installs) else {
+        println!("{}", lang.log_no_install_headless());
+        return;
+    };
+    let src = &installs[idx];
+    let dest = install::dest_for(src);
+    let mut log = |m: String| println!("{m}");
+    match install::build(src, &dest, &cfg.flags(), lang, &mut log) {
+        Ok(m) => println!(
+            "{}",
+            lang.log_built_headless(&m.version, &m.dir.display().to_string())
+        ),
+        Err(e) => eprintln!("× {e:#}"),
+    }
+}
+
 /// 字体栈：Windows 上拉丁用 Segoe UI（系统原生 UI 字体，小字号锐利），中文回退雅黑；
 /// 等宽区保持 Hack 主导、中文回退——不再把整条家族链替换成雅黑（那是"难看"的主因）。
 /// macOS/Linux 直接用系统 CJK 字体（苹方/Noto 的拉丁本身清晰），行为与旧版一致。
@@ -278,6 +300,47 @@ fn pick_unseen_url(
     newest
 }
 
+/// 自动打开登录页的冷却表（档案名 → unix 秒），`~/.tvx/auth-open.json`。
+///
+/// 为什么需要：登录页每加载一次都会生成新的 `key=`，客户端把它写进 `tvx-launch.log`
+/// 的 `TVX_AUTH_URL`。只按"URL 变没变"去重的话，打开一次 → URL 变了 → 判定成新 URL
+/// → 再拉起一个进程 → 又生成新的 key…… 这就是"客户端一直在不停重启"。
+fn auth_open_path() -> std::path::PathBuf {
+    install::tvx_root().join("auth-open.json")
+}
+
+/// 同一档案两次自动打开登录页的最小间隔（秒）。
+const AUTH_OPEN_COOLDOWN_SECS: u64 = 180;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 去重表是否需要写回磁盘。
+///
+/// `pick_unseen_url` 命中"已记录的档案"时是覆盖旧值，`len` 不变——只按长度判断
+/// 就会漏掉这种更新，下一轮又从磁盘读回旧值，判成新 URL，反复拉起客户端。
+fn seen_needs_flush(picked_any: bool, len_before: usize, len_after: usize) -> bool {
+    picked_any || len_before != len_after
+}
+
+/// 是否允许为这个档案自动打开登录页。
+///
+/// - 实例已经在跑：不允许（登录页由实例自己开，外部再拉进程会让 URL 被反复投递）
+/// - 距离上次自动打开不足冷却期：不允许（`key=` 每次都会变，按 URL 去重挡不住）
+fn auth_open_allowed(last_opened: Option<u64>, now: u64, running: bool) -> bool {
+    if running {
+        return false;
+    }
+    match last_opened {
+        Some(t) => now.saturating_sub(t) >= AUTH_OPEN_COOLDOWN_SECS,
+        None => true,
+    }
+}
+
 /// 监听各账号日志里最新的 `TVX_AUTH_URL`，用**无痕窗口**打开（避开旧账号会话）。
 /// 每个档案只对"自己没处理过"的 URL 触发一次。
 fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<String> {
@@ -299,8 +362,11 @@ fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<String> {
             url.starts_with("http").then_some((p.name, url))
         }),
     );
-    let changed = seen.len() != before;
-    if changed {
+    // 只看长度是错的：`pick_unseen_url` 对**已存在的档案**是覆盖旧值，长度不变。
+    // 于是"发现新 URL → 打开登录页 → 登录页生成新的 key= → 内存里更新了但没落盘
+    // → 下一轮又从磁盘读回旧值 → 又判定新 URL"，客户端就会被无限拉起，
+    // 表现出来就是"一直在重启"。
+    if seen_needs_flush(newest.is_some(), before, seen.len()) {
         let _ = std::fs::create_dir_all(install::tvx_root());
         if let Ok(s) = serde_json::to_string_pretty(&seen) {
             let _ = std::fs::write(&seen_file, s);
@@ -310,12 +376,34 @@ fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<String> {
     let (pname, url) = newest?;
     let url = url.as_str();
 
+    // 闸一：档案已经在跑。登录页由那个实例自己开，从外面再拉一个进程只会让
+    // 单实例锁把 URL 反复投递给同一个实例。
+    let target = profiles::list().into_iter().find(|p| p.name == pname);
+    let already_running = target
+        .as_ref()
+        .map(|p| profiles::running_pid(p).is_some())
+        .unwrap_or(false);
+
+    // 闸二：冷却期内不重复打开。key= 每次都会变，没有这道闸就是死循环。
+    let mut opened: BTreeMap<String, u64> = std::fs::read_to_string(auth_open_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let now = unix_now();
+    if !auth_open_allowed(opened.get(&pname).copied(), now, already_running) {
+        return None;
+    }
+    opened.insert(pname.clone(), now);
+    let _ = std::fs::create_dir_all(install::tvx_root());
+    if let Ok(s) = serde_json::to_string(&opened) {
+        let _ = std::fs::write(auth_open_path(), s);
+    }
+
     // 先试"应用内标签页"：登录页在应用里渲染，cookie 直接落进该账号目录，
     // 不需要浏览器、也不需要 tradingview:// 回调（浏览器常把回调拦掉）。
-    let opened_in_app = profiles::list()
-        .into_iter()
-        .find(|p| p.name == pname)
-        .map(|p| profiles::open_in_app_tab(&p, url).is_ok())
+    let opened_in_app = target
+        .as_ref()
+        .map(|p| profiles::open_in_app_tab(p, url).is_ok())
         .unwrap_or(false);
 
     // 同时盯住被商店版抢走的回调（token 卡在那个进程的命令行里）
@@ -429,6 +517,8 @@ enum Act {
     ReapplyPatches,
     /// 按指定的安装重建托管副本（客户端升级后副本还停在旧版本时用）
     RebuildCopy(usize),
+    /// 重新跑一遍环境体检，并把完整报告写进日志（`_doctor` 的界面入口）
+    Doctor,
 }
 
 /// 构建门禁的判定：本次构建的源版本是否不在已验证白名单里。
@@ -504,6 +594,9 @@ pub struct App {
     launching: HashMap<String, Instant>,
     /// 启动时只检查一次"托管副本的补丁是否需要升级"
     patch_checked: bool,
+    /// 启动前的环境体检结果（空 = 正常）。非空时顶栏常驻红字提示，
+    /// 并会阻止启动——见 `install::environment_problems`。
+    env_warn: Vec<crate::install::EnvProblem>,
 }
 
 impl App {
@@ -531,6 +624,7 @@ impl App {
             quitting: false,
             launching: HashMap::new(),
             patch_checked: false,
+            env_warn: crate::install::environment_problems(),
         };
         me.reload();
         if me.profiles.is_empty() {
@@ -663,6 +757,20 @@ impl App {
     fn apply(&mut self, ctx: &egui::Context, act: Act) {
         let lang = self.cfg.lang;
         match act {
+            Act::Doctor => {
+                self.env_warn = crate::install::environment_problems();
+                let report = crate::install::doctor_report();
+                for line in report.lines() {
+                    self.log(line.to_string());
+                }
+                // 报告也落盘一份：截图/日志区会被刷掉，文件不会
+                let path = crate::install::tvx_root().join("doctor.txt");
+                if let Err(e) = std::fs::write(&path, &report) {
+                    self.log(format!("自检报告写入失败：{e}"));
+                } else {
+                    self.log(format!("自检报告已保存：{}", path.display()));
+                }
+            }
             Act::Launch(name) => {
                 let Some(m) = self.managed.clone() else {
                     self.log(lang.log_need_copy());
@@ -1098,6 +1206,25 @@ impl eframe::App for App {
                 });
             });
 
+            // 环境体检不通过时，顶栏常驻红字：这类问题不修，点「启动」也只会
+            // 得到一个英文崩溃框（ENOENT mkdir …\TradingView\logs）。
+            if !self.env_warn.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(RED, egui::RichText::new(t.env_warn).small().strong());
+                    if ui.small_button(t.btn_doctor).clicked() {
+                        act = Some(Act::Doctor);
+                    }
+                });
+                for p in self.env_warn.iter().take(3) {
+                    ui.label(
+                        egui::RichText::new(format!("• {}", p.detail))
+                            .small()
+                            .color(RED),
+                    );
+                }
+            }
+
             ui.add_space(4.0);
             // 状态行：安装在哪儿 + 副本状态（版本 / 补丁 / 校验合成一个徽标），
             // 右侧只留一个主操作；打开目录、删除副本属于低频维护，收进折叠区
@@ -1168,7 +1295,10 @@ impl eframe::App for App {
                             AMBER,
                             egui::RichText::new(t.copy_newer_unverified.replace("{v}", v)).small(),
                         )
-                        .on_hover_text(t.copy_newer_unverified_hint);
+                        .on_hover_text(
+                            t.copy_newer_unverified_hint
+                                .replace("{refv}", patch::VERIFIED_VERSION),
+                        );
                         if ui
                             .add_enabled(can_build, egui::Button::new(t.btn_rebuild_anyway).small())
                             .on_disabled_hover_text(t.chk_allow_unverified)
@@ -1646,6 +1776,35 @@ mod tests {
 
     // ---------------------------------------------------------------- 版本门禁
     // 这组用例覆盖"白名单 + 显式确认"的实际判定，不依赖 UI 渲染。
+
+    /// 去重表落盘判定：命中已存在的档案时 `len` 不变，但值确实变了，必须写回。
+    /// 漏掉这一步 = 每轮都从磁盘读回旧 URL → 反复拉起客户端（"一直在重启"）。
+    #[test]
+    fn seen_map_flushes_when_an_existing_entry_changes() {
+        // 新档案：长度变了
+        assert!(seen_needs_flush(true, 3, 4));
+        // 覆盖已有档案：长度没变，但 pick 返回了 Some → 必须落盘
+        assert!(seen_needs_flush(true, 4, 4));
+        // 什么都没发现 → 不写盘
+        assert!(!seen_needs_flush(false, 4, 4));
+    }
+
+    /// 自动打开登录页的两道闸。缺了它们就是"客户端不停重启"：
+    /// 打开一次会生成新的 `key=`，按 URL 去重的旧逻辑每次都判定成新 URL → 再拉进程。
+    #[test]
+    fn auth_page_is_not_reopened_in_a_loop() {
+        let now = 1_000_000;
+        // 从没开过、也没在跑 → 允许
+        assert!(auth_open_allowed(None, now, false));
+        // 实例在跑 → 一律不再从外面拉进程
+        assert!(!auth_open_allowed(None, now, true));
+        assert!(!auth_open_allowed(Some(now - 1), now, true));
+        // 刚开过（冷却期内）→ 不重复开
+        assert!(!auth_open_allowed(Some(now - 1), now, false));
+        assert!(!auth_open_allowed(Some(now - AUTH_OPEN_COOLDOWN_SECS + 1), now, false));
+        // 过了冷却期 → 允许重试
+        assert!(auth_open_allowed(Some(now - AUTH_OPEN_COOLDOWN_SECS), now, false));
+    }
 
     #[test]
     fn verified_source_needs_no_confirmation() {
