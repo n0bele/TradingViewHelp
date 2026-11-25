@@ -58,16 +58,15 @@ pub struct S {
     /// 「自检」按钮：重跑体检并把完整报告写进日志
     pub btn_doctor: &'static str,
     pub features: &'static str,
-    pub cb_ads: &'static str,
-    pub cb_ads_hint: &'static str,
+    /// 拦截广告弹窗（广告域名 + 充值窗口 + 页内推广浮层，一个开关）
+    pub cb_adblock: &'static str,
+    pub cb_adblock_hint: &'static str,
     pub cb_charts: &'static str,
     pub cb_charts_hint: &'static str,
     pub cb_study: &'static str,
     pub cb_study_hint: &'static str,
     pub cb_drawings: &'static str,
     pub cb_drawings_hint: &'static str,
-    pub cb_silence: &'static str,
-    pub cb_silence_hint: &'static str,
     pub cb_recover: &'static str,
     pub cb_recover_hint: &'static str,
     pub cb_noupdate: &'static str,
@@ -149,16 +148,14 @@ static ZH: S = S {
     env_warn: "环境异常，启动会被阻止：",
     btn_doctor: "自检",
     features: "功能",
-    cb_ads: "拦截广告/追踪网络",
-    cb_ads_hint: "网络层拦掉广告与追踪域名",
+    cb_adblock: "拦截广告弹窗",
+    cb_adblock_hint: "广告域名直接拦掉；充值/订阅窗口不再打开，图表里的推广浮层就地隐藏",
     cb_charts: "多图表布局解锁",
     cb_charts_hint: "客户端 gate：free 档上限 1，注入后放行",
     cb_study: "指标叠加解锁",
     cb_study_hint: "客户端 gate：子指标上限 free 档 1，注入后放大",
-    cb_drawings: "绘图不限（单图 30）",
+    cb_drawings: "绘图不限",
     cb_drawings_hint: "客户端 gate：free 档单张图表上限 30 个绘图（隐藏/锁定的也算，删除立即释放），注入后不再拦。实测建到 40 条不弹框，且超额部分服务端照常存档、重载后仍在",
-    cb_silence: "屏蔽充值窗口",
-    cb_silence_hint: "不再弹出充值窗口：壳层订阅遮罩 + 图表页内推广浮层，开机即生效",
     cb_recover: "断线自动恢复",
     cb_recover_hint: "检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复，4 秒未恢复就重载页面，之后按 15 秒 / 1 分钟 / 5 分钟再试（最多 4 次，仍失败就保留弹窗）；连续 1 分钟无弹窗则重新计数。只做恢复，不改变服务端并发配额",
     cb_noupdate: "禁用自动更新",
@@ -236,16 +233,14 @@ static EN: S = S {
     env_warn: "Environment problem, launching is blocked:",
     btn_doctor: "Self-check",
     features: "Features",
-    cb_ads: "Block ads & trackers",
-    cb_ads_hint: "Cancel ad/tracking domains at the network layer",
+    cb_adblock: "Block ads & billing popups",
+    cb_adblock_hint: "Ad domains are cancelled; billing/subscription windows never open and in-chart promos stay hidden",
     cb_charts: "Multi-chart layouts",
     cb_charts_hint: "Client-side gate: free tier allows 1; the injection lifts it",
     cb_study: "Study-on-study",
     cb_study_hint: "Client-side gate: free tier child limit 1; the injection raises it",
     cb_drawings: "Unlimited drawings",
     cb_drawings_hint: "Client-side gate: free tier caps one chart at 30 drawings (hidden/locked ones count, deleting frees a slot); the injection stops the check. Verified: 40 drawings on one chart, no paywall, and the extra ones are saved server-side and survive a reload",
-    cb_silence: "Block billing popups",
-    cb_silence_hint: "Hide billing popups: shell paywall windows + in-chart promo overlays, effective from startup",
     cb_recover: "Auto-recover on disconnect",
     cb_recover_hint: "When the site shows a \"connection closed\" / \"restore connection\" dialog, click restore; reload the page if still down after 4s, then retry after 15s / 1min / 5min (max 4 tries, dialog is kept if all fail). The counter resets after 1 minute without a dialog. Recovery only — it cannot raise the server-side connection quota",
     cb_noupdate: "Disable auto-update",
@@ -475,11 +470,10 @@ impl Lang {
     /// 开关摘要：开 / 关（自动更新用 禁用 / 照常）
     pub fn log_switches(
         &self,
-        ads: bool,
+        adblock: bool,
         charts: bool,
         study: bool,
         drawings: bool,
-        silence: bool,
         no_update: bool,
     ) -> String {
         let (on, off) = match self {
@@ -494,14 +488,13 @@ impl Lang {
             (_, false) => "照常",
         };
         let head = match self {
-            Lang::Zh => "开关：广告拦截 {ads} · 多图表 {charts} · 指标叠加 {study} · 绘图不限 {draw} · 屏蔽充值窗口 {silence} · 自动更新 {upd}",
-            Lang::En => "Options: ads {ads} · charts {charts} · study {study} · drawings {draw} · block billing popups {silence} · auto-update {upd}",
+            Lang::Zh => "开关：拦截广告弹窗 {adblock} · 多图表 {charts} · 指标叠加 {study} · 绘图不限 {draw} · 自动更新 {upd}",
+            Lang::En => "Options: adblock {adblock} · charts {charts} · study {study} · drawings {draw} · auto-update {upd}",
         };
-        head.replace("{ads}", st(ads))
+        head.replace("{adblock}", st(adblock))
             .replace("{charts}", st(charts))
             .replace("{study}", st(study))
             .replace("{draw}", st(drawings))
-            .replace("{silence}", st(silence))
             .replace("{upd}", upd)
     }
 

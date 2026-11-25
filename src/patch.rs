@@ -54,18 +54,17 @@ pub fn is_verified(version: &str) -> bool {
 }
 
 /// 用户可配置的功能开关（持久化在 tvx 的 config.json）。
-/// 广告拦截 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 / 断线自愈
-/// 各自独立；指标数量 / 布局保存 / 警报由服务端强制（客户端无法解除拒绝），
-/// 共用「屏蔽充值窗口」。
+/// 拦截广告弹窗 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 / 断线自愈
+/// 各自独立。拦截广告弹窗是**一个**功能：网络层拦广告域名、壳层不再开充值窗口、
+/// 图表页内推广浮层就地隐藏——三者对用户是同一件事（窗口别弹出来），所以共用一个开关。
 /// 登录回调直达不在其中：它是多账号能用起来的前提（见 `Group::Auth`），恒开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
-    pub ads_block: bool,
+    pub adblock: bool,
     pub charts_unlock: bool,
     pub study_on_study: bool,
     /// 单张图表的绘图数量上限（free 档 30）：客户端 gate，注入后不限
     pub drawings_unlock: bool,
-    pub silence_paywalls: bool,
     pub no_auto_update: bool,
     /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
     pub auto_recover: bool,
@@ -77,11 +76,10 @@ pub struct Flags {
 impl Default for Flags {
     fn default() -> Self {
         Self {
-            ads_block: true,
+            adblock: true,
             charts_unlock: true,
             study_on_study: true,
             drawings_unlock: true,
-            silence_paywalls: true,
             no_auto_update: true,
             auto_recover: true,
             alerts: true,
@@ -92,10 +90,15 @@ impl Default for Flags {
 /// 补丁所属的功能组，决定它受哪个开关控制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
-    /// 充值窗口屏蔽（涵盖指标数量、布局保存、警报的服务端配额弹窗）
-    Silence,
-    /// 广告/追踪域名网络拦截
-    Ads,
+    /// 拦截广告弹窗（合并后的单一功能）：
+    /// - 网络层拦掉广告域名；
+    /// - 壳层不再创建订阅遮罩窗口、`showPaywall` 空操作、开窗拦充值/推广链接；
+    /// - 图表页内的推广浮层插入即隐藏；
+    /// 指标数量 / 布局保存 / 警报这类服务端强制项（客户端解不掉）也归这里——
+    /// 用户看到的就是「少一个要充值的窗口」，不该拆成两个开关。
+    /// 另外「放宽离线判定超时」（1s→10s）也留在这组：它防的是代理环境被误判离线
+    /// 而弹出重连框，和"别弹窗"是同一件事，合并前就跟着充值屏蔽开关走。
+    AdBlock,
     /// 多图表布局客户端 gate 解锁
     Charts,
     /// 指标叠加（STUDY_ON_STUDY）客户端 gate 解锁
@@ -113,13 +116,17 @@ pub enum Group {
     Recover,
     /// 本地指标报警（页内引擎 + 设置页 + 主进程通知）
     Alerts,
+    /// 注入前提：`dom-ready` 等到 BrowserView 就绪再调 `handleDomReady()`。
+    /// 恒开、不提供开关——其余所有页内注入（自愈/多图表/指标/绘图/推广）都排在他后面，
+    /// 若做成可关，用户关掉某一个功能就会把「启动期重试」一起关掉，那些功能重新出现
+    /// 启动后几十秒的空窗（v0.1.6 初版真的踩到了：壳挂在「拦截广告弹窗」的推广补丁里）。
+    Core,
 }
 
 impl Group {
     fn enabled(self, f: &Flags) -> bool {
         match self {
-            Group::Silence => f.silence_paywalls,
-            Group::Ads => f.ads_block,
+            Group::AdBlock => f.adblock,
             Group::Charts => f.charts_unlock,
             Group::StudyOnStudy => f.study_on_study,
             Group::Drawings => f.drawings_unlock,
@@ -127,6 +134,7 @@ impl Group {
             Group::Auth => true,
             Group::Recover => f.auto_recover,
             Group::Alerts => f.alerts,
+            Group::Core => true,
         }
     }
 }
@@ -278,33 +286,37 @@ const DOM_READY_HEAD: &str =
 const RECOVER_SCRIPT_TAIL: &str = "\").catch((()=>{})),";
 const RECOVER_URL_TAIL: &str = "this.url&&";
 
-/// 「页内推广浮层」注入段的起点：当前版（v3）与上一版（v2）。
-/// 脚本本体每升级一次（v1 轮询点关闭 → v2 插入即拦 → v3 视图就绪重试）文本就全变，
-/// 靠 old 精确匹配必然失配，所以和断线段一样按边界整段替换。
+/// `.on("dom-ready",…)` 的原始形态，Core 补丁的 old。
+const DOM_READY_ORIG: &str = ".on(\"dom-ready\",(()=>{this.handleDomReady()}))";
+
+/// 轮询壳里留给注入的"空位"：Core 补丁的 new 写成 `…t.handleDomReady(),void 0;…`，
+/// 推广补丁把这一小段替换成 `…,void t.executeJavaScript("…")`。
+/// 空位与填充分开，是为了让「等视图就绪」这件事不再挂在任何功能开关上。
+const SHELL_HOOK: &str = "t.handleDomReady(),void 0";
+
+/// `.on("dom-ready",…)` 的轮询壳：等 BrowserView 就绪再调 `handleDomReady()`，
+/// 每 250ms 试一次、最多 1200 次（5 分钟）。
 ///
-/// **v3 修的是实测确认的空窗**：`.on("dom-ready",…)` 里原来的写法是
-/// `this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript("…")`
-/// —— 首次 dom-ready 触发时 `browserViewMember` 还是 null（`isBrowserViewValid()` 为假），
-/// 整段注入被跳过且**没有任何重试**；全文件 dom-ready 只挂这一处、每次启动只触发一次，
-/// 于是启动后 48~56 秒（两次实测）页面处于"一条注入都没打上"的状态，推广弹窗正好在这段
-/// 时间窗里出现。v3 把回调改成轮询：`isBrowserViewValid()` 一为真就执行
-/// `handleDomReady()` + 注入了，最多等 300 秒（1200 × 250ms），并在主进程 stdout 留一行
-/// 日志便于事后核对。
-/// `{g}` 是"代次"令牌：`dom-ready` 若再触发一次（导航），新的循环把 `__tvxDR` 加一，
-/// 旧的循环下一拍就退出——保证同一个页面只执行一次 `handleDomReady`（改动前也是如此）。
-const PROMO_SEG_HEAD: &str = ".on(\"dom-ready\",(()=>{var t=this,n=0,g=t.__tvxDR=(t.__tvxDR||0)+1;(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())return n>0&&console.log(\"[tvx] dom-ready ready after \"+n+\" retries\"),t.handleDomReady(),void t.executeJavaScript(\"";
-/// 上一版（v2）的段起点，只用于把已装好的副本迁移到 v3。
-const PROMO_SEG_HEAD_V2: &str =
-    ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"";
-/// 段起点的识别前缀（含 v3 早期形态：没有代次令牌的那一版）。
-/// 识别用前缀而不是整段段首，是为了让 v3 自身的小改动（加日志、加令牌）都能被认出来。
+/// **为什么必须等**：首次 dom-ready 触发时 `browserViewMember` 常常还是 null，
+/// 而 `handleDomReady()` 的函数体（断线自愈补丁插入的）以 `this.isBrowserViewValid()&&(`
+/// 开头——视图无效时整段短路且**不再重试**，于是断线自愈、多图表/指标/绘图注入、
+/// 标题更新与任务通知订阅会一起丢掉几十秒（实测启动后 48~56s 页面没有任何注入）。
+/// `__tvxDR` 是代次令牌：`dom-ready` 再触发（导航）时旧循环自动退出，
+/// 保证同一页面只执行一次 `handleDomReady()`（改动前也是这个语义）。
+const DOM_READY_SHELL: &str = ".on(\"dom-ready\",(()=>{var t=this,n=0,g=t.__tvxDR=(t.__tvxDR||0)+1;(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())return n>0&&console.log(\"[tvx] dom-ready ready after \"+n+\" retries\"),t.handleDomReady(),void 0;n<1200?((0===n&&console.log(\"[tvx] dom-ready: browser view not ready, retrying\"),n++,setTimeout(r,250))):console.warn(\"[tvx] dom-ready: browser view still invalid after 300s\")})()}))";
+
+/// 历史形态（v2：`handleDomReady()` 与注入耦合在同一个回调里），只用于识别待迁移的旧副本。
+const PROMO_SEG_HEAD_V2: &str = ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"";
+
+/// 待迁移段的识别前缀：v3 初版（壳与注入耦合，壳以 `var t=this` 开头）与 v2。
+/// 用前缀而不是整段，是为了让壳自身的小改动（加日志、加令牌）都能被认出来。
 const PROMO_SEG_HEADS: &[&str] = &[
-    PROMO_SEG_HEAD,
     ".on(\"dom-ready\",(()=>{var t=this",
     PROMO_SEG_HEAD_V2,
 ];
-/// 注入脚本在 `.on("dom-ready",…)` 里的收尾标记：从这里往后按括号配平即可算出段尾
-///（关闭箭头函数 + 关闭 `.on(` 两层括号），不必把各版尾巴抄成常量——抄了就一定漂移。
+
+/// 注入脚本的收尾标记：迁移测试用它确认脚本只落一处（配平算段尾不依赖它）。
+#[cfg(test)]
 const PROMO_SEG_END_MARK: &str = "\").catch((()=>{}))";
 
 const LEGACY_RECOVER_V1: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript("(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;var n=0,last=0,waits=[15000,60000,300000];function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<600&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(/恢复连接|重新连接|Restore connection|Reconnect/i.test(t))return b[i]}return null}function tick(){var d=dlg();if(!d)return;d.setAttribute('data-tvx-recovering','1');var b=btn(d);if(b){try{b.click()}catch(e){}}setTimeout(function(){if(!dlg())return;if(n>=3)return;var now=Date.now();if(now-last<(waits[n]||3e5))return;last=now;n++;try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();").catch((()=>{})),this.url&&"#;
@@ -327,31 +339,39 @@ const LEGACY: &[(&str, &str)] = &[
 ];
 
 pub const PATCHES: &[Patch] = &[
+    // 恒开、排在最前：其余页内补丁的注入都挂在这层壳后面，必须先就位。
+    Patch {
+        name: "dom-ready 就绪重试壳",
+        name_en: "dom-ready readiness retry shell",
+        group: Group::Core,
+        old: DOM_READY_ORIG,
+        new: DOM_READY_SHELL,
+    },
     Patch {
         name: "订阅遮罩窗口不再创建",
         name_en: "Paywall overlay window not created",
-        group: Group::Silence,
+        group: Group::AdBlock,
         old: "async function vL(e,t){const n=(0,Le.Qh)().getLastFocusedWindow();",
         new: "async function vL(e,t){return;const n=(0,Le.Qh)().getLastFocusedWindow();",
     },
     Patch {
         name: "showPaywall 变空操作",
         name_en: "showPaywall becomes a no-op",
-        group: Group::Silence,
+        group: Group::AdBlock,
         old: "showPaywall(e,t){return vL(e,t)}",
         new: "showPaywall(e,t){return Promise.resolve()}",
     },
     Patch {
         name: "网页内充值窗口不再注入",
         name_en: "In-page billing popup not injected",
-        group: Group::Silence,
+        group: Group::AdBlock,
         old: "async requestProFeature(){const e=(0,Le.Qh)().getLastFocusedWindow();",
         new: "async requestProFeature(){return;const e=(0,Le.Qh)().getLastFocusedWindow();",
     },
     Patch {
         name: "页面请求开窗时拦截充值/推广链接",
         name_en: "Block promo/pricing windows requested by the page",
-        group: Group::Silence,
+        group: Group::AdBlock,
         // 页面（web app）可以通过 IPC OPEN_NEW_WINDOW 让壳开任意 URL 的新窗口，
         // 这条路径之前没有任何限制——定时弹出的"充值窗口"就是从这里来的。
         // 只拦 URL 命中充值/推广关键字的请求，正常业务开窗（K 线弹窗、分享等）不受影响。
@@ -364,26 +384,25 @@ pub const PATCHES: &[Patch] = &[
     Patch {
         name: "页内推广浮层插入即拦截",
         name_en: "Intercept in-page upgrade popups before they paint",
-        group: Group::Silence,
+        group: Group::AdBlock,
         // 前三条只管壳层（独立窗口 / IPC）。TradingView 把升级提示改成了图表页自己渲染的
         // React 浮层，壳层补丁看不到它。v1 用"1.2 秒轮询 + 文案匹配 + 点关闭"来兜，
         // 实战漏了两张（文案里没有 TradingView 的那张指标数量卡、以及点了没用的 ×）：
         // 判定发生在浮层已经画出来之后，本质上仍是"事后清理"。
         // v2 改成 MutationObserver：节点插入 DOM 的微任务里就判定并隐藏，命中即不上屏；
         // 识别只看不翻译的结构与品牌词，不再要求某种语言的标题文案。
-        // v3 把 dom-ready 回调改成"等 BrowserView 就绪再注入"（详见 PROMO_SEG_HEAD 的注释）：
-        // 原来 `isBrowserViewValid()&&…` 在首次 dom-ready 时为假，整段注入被跳过且不重试，
-        // 实测启动后 48~56 秒页面没有任何注入——这段空窗期正好是推广弹窗出现的时间。
-        // 另：DIS（"别藏，交给断线自愈"）原先把「获取更多连接」也算断线文案，而连接数付费墙
-        // 的标题就是「获取更多连接，同时查看更多图表」→ 被当成断线直接放行（已造 DOM 复现）。
+        // v3 的「等视图就绪」由恒开的 Core 补丁提供（见 DOM_READY_SHELL）；本条只往壳的
+        // 空位（SHELL_HOOK）里填注入脚本——这样单独关掉「拦截广告弹窗」不会把重试壳一起关掉。
+        // 原来的写法是 `{this.handleDomReady(),this.isBrowserViewValid()&&executeJavaScript(…)}`，
+        // 首次 dom-ready（视图未就绪）时整段跳过且不重试，实测启动后 48~56 秒零注入。
         // 现在 DIS 只认真正的断线句（关闭了这个连接 / 连接已关闭 / We closed this connection…）。
-        old: ".on(\"dom-ready\",(()=>{this.handleDomReady()}))",
-        new: ".on(\"dom-ready\",(()=>{var t=this,n=0,g=t.__tvxDR=(t.__tvxDR||0)+1;(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())return n>0&&console.log(\"[tvx] dom-ready ready after \"+n+\" retries\"),t.handleDomReady(),void t.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}));n<1200?((0===n&&console.log(\"[tvx] dom-ready: browser view not ready, retrying\"),n++,setTimeout(r,250))):console.warn(\"[tvx] dom-ready: browser view still invalid after 300s\")})()}))",
+        old: SHELL_HOOK,
+        new: "t.handleDomReady(),void t.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}))",
     },
     Patch {
         name: "广告/追踪域名网络拦截",
         name_en: "Ad/tracker domain blocking",
-        group: Group::Ads,
+        group: Group::AdBlock,
         // 挂在既有 initSession 的 webRequest 配置处（onBeforeSendHeaders 之后，
         // will-download 注册之前）。实测当前图表页无广告 DOM，此为预防性网络层拦截，
         // 命中第三方广告网络（Google Ads 系/Taboola/Outbrain 等常见买量网络）时直接取消。
@@ -473,7 +492,7 @@ pub const PATCHES: &[Patch] = &[
     Patch {
         name: "放宽离线判定超时",
         name_en: "Relax the offline-detection timeout",
-        group: Group::Silence,
+        group: Group::AdBlock,
         // 应用用一个 1 秒超时的 ping（data.tradingview.com/ping）判定在线/离线。
         // 走代理时一次握手就可能超过 1 秒，于是被误判成"离线"（并触发重连弹窗）。
         // 这里把默认超时从 1s 放宽到 10s。
@@ -658,12 +677,16 @@ fn recover_segment_range(src: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// 定位「页内推广浮层」注入段的字节区间（PROMO_SEG_HEAD … 段尾）。
+/// 定位 `.on("dom-ready",…)` 回调段的字节区间（含重试壳与可能的注入脚本）。
 ///
-/// 起点认两版：当前的 v3（带视图就绪重试）或历史的 v2。段尾不按字面抄：
-/// 从 `.on(` 的起点整体按括号配平走到深度归零（跳过字符串字面量），
-/// 中间插了什么语句（v2 什么都没有，v3 有重试用的 IIFE）都不影响。
-/// 抄一段尾巴就是多一处漂移点——改一次重试文案就会把"升级旧副本"搞坏。
+/// 起点只认「我们改过」的形态：v3 初版（壳与注入耦合，壳以 `var t=this` 开头）或 v2。
+/// 最初的 `.on("dom-ready",(()=>{this.handleDomReady()}))` 不在此列——它还没有壳，
+/// 交给 Core 补丁的常规 old→new 打上。
+///
+/// 段尾不按字面抄：从 `.on(` 起按括号配平走到深度归零（跳过字符串字面量），
+/// 壳里的重试分支与注入脚本写多长都不影响。配平后还要看紧邻的字符是否像
+/// 语句边界（`;` `,` `)` 或换行）：正则字面量里的括号如果把它带偏，这里会拒绝迁移，
+/// 宁可不迁也不能切错半个表达式——切错会让主进程加载即语法错误。
 fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
     let open = ".on(\"dom-ready\",(()=>{";
     let (start, body) = {
@@ -678,8 +701,8 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
             from = s + open.len();
         }
     };
-    // 段内必须有注入脚本的收尾标记，否则不是我们的注入段
-    if !src[body..].contains(PROMO_SEG_END_MARK) {
+    // 段内必须真的调了 handleDomReady，否则不是这个回调
+    if !src[body..].contains("handleDomReady()") {
         return None;
     }
     // 括号配平（跳过字符串字面量：注入脚本里全是引号里的括号）
@@ -705,7 +728,13 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
-                        return Some((start, i + 1));
+                        // 语句边界校验：配平若被正则字面量带偏，这里会落到表达式中间
+                        let ok = match bytes.get(i + 1) {
+                            None => true,
+                            Some(b';' | b',' | b')' | b'\n' | b'\r' | b' ' | b'\t') => true,
+                            _ => false,
+                        };
+                        return if ok { Some((start, i + 1)) } else { None };
                     }
                 }
                 _ => {}
@@ -724,6 +753,15 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
 /// - 开关开 + 已打过 → 不动（AlreadyPatched）
 /// - 开关关 + 已打过 → 撤回 new→old（Reverted）
 /// - 开关关 + 未打过  → 不动（Untouched）
+/// Core 壳的识别标记（代次令牌的赋值语句，壳独有）。
+///
+/// 壳的 `new` 里留了注入空位（`SHELL_HOOK`），推广补丁打上后会把它替换成注入脚本——
+/// 于是"整段 `contains(core.new)`"在打完补丁的文件里必然为假。重入判定与 `is_patched`
+/// 都只能认这个标记，否则每次 _reapply 都会把 Core 误报成"锚点未命中"。
+fn core_shell_present(s: &str) -> bool {
+    s.contains("t.__tvxDR=(t.__tvxDR||0)+1")
+}
+
 pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
     let bytes = fs::read(index_js).with_context(|| format!("读取 {}", index_js.display()))?;
     let mut src = String::from_utf8(bytes)
@@ -777,18 +815,21 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
         }
     }
 
-    // 0c) 「页内推广浮层」同样按段迁移：v1（文案门 + 点关闭 + 1.2 秒轮询）与 v2
-    //     （MutationObserver 插入即拦）文本完全不同，靠 old 精确匹配会失配，
-    //     还会把已装好的副本判成"锚点未命中"。这里整段换成当前版本。
-    if let Some(p) = PATCHES.iter().find(|p| p.new.contains("__tvxGuard")) {
+    // 0c) `.on("dom-ready",…)` 回调段按段迁移：v2（注入与 handleDomReady 耦合）与
+    //     v3 初版（壳与注入耦合）文本完全不同，靠 old 精确匹配会失配，
+    //     还会把已装好的副本判成"锚点未命中"。
+    //     现行形态是「恒开的 Core 壳 + 可开关的注入」：旧副本先统一重置成壳，
+    //     注入由下面的常规循环按开关补——既不会把重试壳跟着开关一起带走，
+    //     也不会在关掉开关后残留旧注入。
+    if let (Some(core), Some(p)) = (
+        PATCHES.iter().find(|p| p.group == Group::Core),
+        PATCHES.iter().find(|p| p.new.contains("__tvxGuard")),
+    ) {
         if let Some((s, e)) = promo_segment_range(&src) {
-            let stale = {
-                let seg = &src[s..e];
-                seg != p.old && seg != p.new
-            };
-            if stale {
-                let target = if p.group.enabled(flags) { p.new } else { p.old };
-                src.replace_range(s..e, target);
+            let with_guard = core.new.replacen(p.old, p.new, 1);
+            let seg = &src[s..e];
+            if seg != core.new && seg != with_guard {
+                src.replace_range(s..e, core.new);
             }
         }
     }
@@ -834,6 +875,11 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
             continue;
         }
 
+        // Core 壳的空位可能已被注入填掉（见 core_shell_present），先认壳特征
+        if p.group == Group::Core && core_shell_present(&src) {
+            report.push((p.name, Status::AlreadyPatched));
+            continue;
+        }
         if src.contains(p.new) && !src.contains(p.old) {
             report.push((p.name, Status::AlreadyPatched));
             continue;
@@ -985,7 +1031,12 @@ pub fn is_patched(index_js: &Path, flags: &Flags) -> bool {
             // 精确锚点之外，再看通配锚点：上游只重排压缩标识符时，new/old 字面都不在
             // 文件里，但补丁其实打得是对的，不能误报"补丁异常"。
             let wild = WILD_ANCHORS.iter().find(|w| w.patch == p.name);
-            let has_new = s.contains(p.new) || wild.is_some_and(|w| wild_find_all(&s, w.to).len() == 1);
+            let has_new = if p.group == Group::Core {
+                // 壳里的空位可能已被注入填掉，整段比对不可靠（见 core_shell_present）
+                core_shell_present(&s)
+            } else {
+                s.contains(p.new) || wild.is_some_and(|w| wild_find_all(&s, w.to).len() == 1)
+            };
             let has_old = s.contains(p.old) || wild.is_some_and(|w| wild_find_all(&s, w.from).len() == 1);
             if p.group.enabled(flags) {
                 has_new && !has_old
@@ -1130,14 +1181,36 @@ mod tests {
         // 但 DIS 不能再认「获取更多连接」——那是连接数付费墙的标题（实测放过）
         assert!(!PROMO_GUARD.contains("获取更多连接"));
         assert!(!PROMO_GUARD.contains("Get more connections"));
-        // v3：dom-ready 回调里等 BrowserView 就绪再注入（否则启动后有一段无注入空窗）
-        assert!(p.new.starts_with(PROMO_SEG_HEAD));
-        assert!(p.new.contains("(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())"));
-        assert!(p.new.contains("browser view not ready, retrying"));
-        assert!(
-            p.new.rsplit_once(PROMO_SEG_END_MARK).is_some(),
-            "段尾标记必须存在（promo_segment_range 靠它定位段尾）"
-        );
+        // v3：注入只填空位；「等 BrowserView 就绪」由恒开的 Core 补丁提供。
+        // 两者绑在一起会让「关掉拦截广告弹窗」顺带关掉启动期重试（审计发现的耦合）。
+        assert_eq!(p.old, SHELL_HOOK, "推广补丁只能填空位，不能自带壳");
+        assert!(p.new.starts_with("t.handleDomReady(),void t.executeJavaScript(\""));
+        assert!(p.new.ends_with("\").catch((()=>{}))"));
+        let core = PATCHES
+            .iter()
+            .find(|q| q.group == Group::Core)
+            .expect("Core 补丁必须在补丁集里");
+        assert_eq!(core.old, DOM_READY_ORIG);
+        assert_eq!(core.new, DOM_READY_SHELL);
+        assert!(core.new.contains(SHELL_HOOK), "壳里必须留出注入空位");
+        assert!(core.new.contains("(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())"));
+        assert!(core.new.contains("browser view not ready, retrying"));
+        // 重入判定与 is_patched 认的是这段特征（core_shell_present），
+        // 壳若改了这段文本必须同步改判定，这里把两处钉在一起
+        assert!(core.new.contains("t.__tvxDR=(t.__tvxDR||0)+1"));
+        assert!(core_shell_present(core.new));
+        assert!(!core_shell_present(core.old), "原始锚点里不应有壳特征");
+        // 壳恒开：关掉全部功能开关也不能把重试带走
+        let all_off = Flags {
+            adblock: false,
+            charts_unlock: false,
+            study_on_study: false,
+            drawings_unlock: false,
+            no_auto_update: false,
+            auto_recover: false,
+            alerts: false,
+        };
+        assert!(Group::Core.enabled(&all_off), "Core 必须恒开");
     }
 
     /// 历史注入文本（只隐藏版 / 只存内存计数的 v1 / 上一版开窗过滤）：apply() 必须能就地
@@ -1230,8 +1303,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// v1（文案门 + 点关闭 + 轮询）→ v2（插入即拦）：已装好的副本里是 v1 文本，
-    /// apply() 必须整段换掉，而不是报"锚点失配"——否则用户升级助手后还是要手工删副本。
+    /// v3 初版（壳与注入耦合在同一个 `.on("dom-ready")` 回调里）→ 现状（恒开壳 + 可开关注入）：
+    /// 已装好的副本里是"整段耦合"的文本，apply() 必须整段重置成壳再按开关补注入，
+    /// 而不是报"锚点失配"——否则用户升级助手后还是要手工删副本。
     #[test]
     fn stale_promo_segment_is_migrated_whole() {
         let dir = std::env::temp_dir().join("tvx-patch-stale-promo-test");
@@ -1242,41 +1316,107 @@ mod tests {
             .iter()
             .find(|q| q.new.contains("__tvxGuard"))
             .expect("页内推广浮层补丁应在补丁集里");
-        // 模拟 v1：同一个注入位置，脚本本体是旧版标记
-        let stale = p.new.replace("window.__tvxGuard=1", "window.__tvxPromo=1");
-        assert_ne!(stale, p.new, "模拟的历史脚本不能与当前脚本相同");
+        // 模拟 v3 初版：壳 + 旧脚本（脚本标记换成 __tvxPromo）耦合在同一个回调里
+        let stale_guard = p.new.replace("window.__tvxGuard=1", "window.__tvxPromo=1");
+        let stale = DOM_READY_SHELL.replacen(SHELL_HOOK, &stale_guard, 1);
+        assert_ne!(stale, DOM_READY_SHELL, "模拟的历史段不能与当前壳相同");
 
+        // 旧副本的形态：Core 的位置放耦合段，推广补丁的小段不存在
         let src: String = PATCHES
             .iter()
             .map(|q| {
-                if q.new.contains("__tvxGuard") {
+                if q.name == p.name {
+                    ""
+                } else if q.group == Group::Core {
                     stale.as_str()
                 } else {
                     q.new
                 }
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&f, &src).unwrap();
 
-        apply(&f, &Flags::default()).unwrap();
+        let report = apply(&f, &Flags::default()).unwrap();
+        assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
         let after = fs::read_to_string(&f).unwrap();
-        assert!(!after.contains("__tvxPromo"), "v1 脚本应被整段换掉");
-        assert!(after.contains("__tvxGuard"), "应迁移成 v2");
-        assert_eq!(after.matches(PROMO_SEG_HEAD).count(), 1, "注入段必须只有一处");
+        assert!(!after.contains("__tvxPromo"), "旧脚本应被整段换掉");
+        assert!(after.contains("__tvxGuard"), "应迁移成当前注入");
+        // 注入打上后壳里的空位被填掉，整段文本不再是 DOM_READY_SHELL，认壳特征
+        assert!(core_shell_present(&after), "壳必须存在");
+        assert_eq!(
+            after.matches("t.__tvxDR=(t.__tvxDR||0)+1").count(),
+            1,
+            "壳必须只有一处"
+        );
         // 尾巴标记 `"` + `.catch` 在别的注入补丁里也有（多图表/指标/绘图/断线），
-        // 这里只认 v3 独有的重试语句，确保注入段没有被复制成两份。
-        assert_eq!(after.matches("browser view not ready, retrying").count(), 1, "v3 重试日志必须只有一处");
+        // 这里只认壳独有的重试语句，确保没有被复制成两份。
+        assert_eq!(after.matches("browser view not ready, retrying").count(), 1, "重试日志必须只有一处");
         assert!(is_patched(&f, &Flags::default()));
 
-        // 关掉「屏蔽充值弹窗」：整段回退成原始锚点
+        // 关掉「拦截广告弹窗」：注入回退成空位，但**壳必须留着**——
+        // 否则断线自愈/绘图等注入会跟着退回"启动后几十秒空窗"的老毛病（审计发现的耦合）。
         let off = Flags {
-            silence_paywalls: false,
+            adblock: false,
             ..Flags::default()
         };
         apply(&f, &off).unwrap();
         let after = fs::read_to_string(&f).unwrap();
         assert!(!after.contains("__tvxGuard"), "关掉后不应留注入");
-        assert!(after.contains(p.old), "关掉后应回到原始 dom-ready 锚点");
+        assert!(after.contains(DOM_READY_SHELL), "关掉推广后重试壳必须保留");
+        assert!(after.contains(SHELL_HOOK), "空位必须回填");
+        assert!(is_patched(&f, &off));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 审计回归：关掉「拦截广告弹窗」（合并后的单一开关）不能把 dom-ready 重试壳一起关掉。
+    ///
+    /// v0.1.6 初版把轮询壳写在「页内推广浮层」这条补丁里（当时的充值屏蔽组），
+    /// 于是用户只要关掉这一个开关，断线自愈 / 绘图 / 多图表的注入就退回
+    /// "首次 dom-ready 视图未就绪 → 整段短路且不重试"的老毛病。
+    /// 现在壳是恒开的 Core 补丁，这条用例把关系钉死。
+    #[test]
+    fn adblock_off_keeps_dom_ready_shell() {
+        let dir = std::env::temp_dir().join("tvx-patch-shell-independence");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("index.js");
+
+        let promo_name = PATCHES
+            .iter()
+            .find(|p| p.new.contains("__tvxGuard"))
+            .map(|p| p.name)
+            .expect("页内推广浮层补丁应在补丁集里");
+        let pristine: String = PATCHES
+            .iter()
+            .filter(|p| p.name != promo_name)
+            .map(|p| p.old)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&f, &pristine).unwrap();
+
+        let off = Flags {
+            adblock: false,
+            ..Flags::default()
+        };
+        apply(&f, &off).unwrap();
+        let after = fs::read_to_string(&f).unwrap();
+
+        assert!(core_shell_present(&after), "关掉推广后重试壳必须还在");
+        assert!(after.contains(SHELL_HOOK), "壳里应留空位");
+        assert!(!after.contains("__tvxGuard"), "推广脚本不应被注入");
+        // 其余注入照常（它们都排在壳后面，靠壳等视图就绪）
+        for mark in ["__tvxRecover", "__tvxDraw", "_exposed_chartWidgetCollection"] {
+            assert!(after.contains(mark), "关掉推广不应影响 {mark} 注入");
+        }
+        assert!(is_patched(&f, &off), "is_patched 应认为当前状态正确");
+
+        // 再打开：注入补上，壳仍只有一处
+        apply(&f, &Flags::default()).unwrap();
+        let back = fs::read_to_string(&f).unwrap();
+        assert!(back.contains("__tvxGuard"));
+        assert_eq!(back.matches("t.__tvxDR=(t.__tvxDR||0)+1").count(), 1);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1331,11 +1471,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// v2（dom-ready 直连注入）→ v3（先等 BrowserView 就绪再注入）：已装好的副本里是 v2 文本，
-    /// 段起点已经换成 `var t=this…`，但段首的 `.on("dom-ready",(()=>{` 还在——
-    /// 迁移必须认出这个旧起点并整段替换，否则用户升级后又要手工删副本。
+    /// v2（`handleDomReady()` 与注入直连）→ 现状（恒开壳 + 注入填空位）：已装好的副本里是 v2 文本，
+    /// 段首是 `.on("dom-ready",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&…`——
+    /// 迁移必须认出这个旧起点并整段换成壳，否则用户升级后又要手工删副本。
     #[test]
-    fn v2_promo_segment_is_migrated_to_v3() {
+    fn v2_promo_segment_is_migrated_to_shell() {
         let dir = std::env::temp_dir().join("tvx-patch-promo-v2-test");
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("index.js");
@@ -1346,10 +1486,9 @@ mod tests {
             .expect("页内推广浮层补丁应在补丁集里");
         let guard = p
             .new
-            .strip_prefix(PROMO_SEG_HEAD)
-            .and_then(|r| r.rsplit_once(PROMO_SEG_END_MARK))
-            .map(|(body, _)| body)
-            .expect("当前补丁文本必须符合段头 + 脚本 + 段尾标记的结构");
+            .strip_prefix("t.handleDomReady(),void t.executeJavaScript(\"")
+            .and_then(|r| r.strip_suffix("\").catch((()=>{}))"))
+            .expect("当前补丁文本必须符合「空位 + 脚本 + 收尾」的结构");
         // 显式拼接，避免 format! 的 `}}` 转义把收尾括号算错一位
         let mut v2 = String::new();
         v2.push_str(PROMO_SEG_HEAD_V2);
@@ -1357,17 +1496,28 @@ mod tests {
         v2.push_str(PROMO_SEG_END_MARK);
         v2.push_str("}))");
 
+        // 旧副本形态：Core 的位置放 v2 段，推广补丁的小段不存在
         let src: String = PATCHES
             .iter()
-            .map(|q| if q.name == p.name { v2.as_str() } else { q.new })
-            .collect();
+            .map(|q| {
+                if q.name == p.name {
+                    ""
+                } else if q.group == Group::Core {
+                    v2.as_str()
+                } else {
+                    q.new
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&f, &src).unwrap();
 
         let report = apply(&f, &Flags::default()).unwrap();
         assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
         let after = fs::read_to_string(&f).unwrap();
         assert!(!after.contains(PROMO_SEG_HEAD_V2), "v2 段首应被换掉");
-        assert!(after.contains(PROMO_SEG_HEAD), "应迁移成 v3（带就绪重试）");
+        assert!(core_shell_present(&after), "应迁移成壳（带就绪重试）");
+        assert!(after.contains("__tvxGuard"), "注入应按开关补上");
         assert_eq!(after.matches("browser view not ready, retrying").count(), 1);
         assert!(is_patched(&f, &Flags::default()));
 
@@ -1414,7 +1564,8 @@ mod tests {
     }
 
     /// 用一段含真实 old 锚点的临时文件，验证开关矩阵下的
-    /// 打上 / 撤回 / 幂等行为。每个组抽一个代表补丁（取其 old/new 对）。
+    /// 打上 / 撤回 / 幂等行为。合并后的「拦截广告弹窗」组含多条补丁，
+    /// 这里整组参与断言：一个开关必须同时管住网络层与壳层。
     #[test]
     fn apply_respects_flags_and_is_reversible() {
         let dir = std::env::temp_dir().join("tvx-patch-flag-test");
@@ -1424,11 +1575,29 @@ mod tests {
         // pristine = 全部补丁 old 依序拼接（apply 按组应用组内全部补丁，
         // 所以每个 old 都必须恰好出现一次；old 之间互不包含已由
         // patches_are_self_consistent 覆盖）
-        let pristine: String = PATCHES.iter().map(|p| p.old).collect();
+        // 推广补丁的 old/new 只是壳内的一小段（空位 ↔ 注入），不是独立语句：
+        // 它在文件里的形态由 Core 的 old（原始调用）或 new（壳）决定，拼接时跳过。
+        let promo_name = PATCHES
+            .iter()
+            .find(|p| p.new.contains("__tvxGuard"))
+            .map(|p| p.name)
+            .expect("页内推广浮层补丁应在补丁集里");
+        let pristine: String = PATCHES
+            .iter()
+            .filter(|p| p.name != promo_name)
+            .map(|p| p.old)
+            .collect();
 
-        // 五个组各取代表补丁，便于后半段断言
-        let silence = PATCHES.iter().find(|p| p.group == Group::Silence).unwrap();
-        let ads = PATCHES.iter().find(|p| p.group == Group::Ads).unwrap();
+        // 各功能组各取代表补丁，便于后半段断言
+        let adblock: Vec<&Patch> = PATCHES
+            .iter()
+            .filter(|p| p.group == Group::AdBlock)
+            .collect();
+        assert!(
+            adblock.len() >= 2,
+            "拦截广告弹窗应同时包含网络层与壳层补丁，实际 {} 条",
+            adblock.len()
+        );
         let charts = PATCHES.iter().find(|p| p.group == Group::Charts).unwrap();
         let study = PATCHES
             .iter()
@@ -1449,20 +1618,20 @@ mod tests {
             .items
             .iter()
             .all(|(_, st)| *st == Status::Applied || *st == Status::AlreadyPatched));
-        assert!(read().contains(ads.new));
+        for p in &adblock {
+            assert!(read().contains(p.new), "{} 应被打上", p.name);
+        }
         assert!(read().contains(charts.new));
-        assert!(read().contains(silence.new));
         assert!(read().contains(study.new));
         assert!(read().contains(noauto.new));
 
         // 2) 全关：可开关的组全部撤回。Auth 组恒开（多账号登录的前提），
         //    所以期望结果是「pristine + Auth 补丁」，而不是逐字 pristine。
         let all_off = Flags {
-            ads_block: false,
+            adblock: false,
             charts_unlock: false,
             study_on_study: false,
             drawings_unlock: false,
-            silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
             alerts: false,
@@ -1470,7 +1639,14 @@ mod tests {
         // 只有 Auth 组生效时的目标文本
         let keep_auth: String = PATCHES
             .iter()
-            .map(|p| if p.group == Group::Auth { p.new } else { p.old })
+            .filter(|p| p.name != promo_name)
+            .map(|p| {
+                if p.group == Group::Auth || p.group == Group::Core {
+                    p.new
+                } else {
+                    p.old
+                }
+            })
             .collect();
         write_pristine(&read()); // 当前是已打状态，先按现状
         let report = apply(&f, &all_off).unwrap();
@@ -1478,8 +1654,11 @@ mod tests {
             st,
             Status::Reverted | Status::Untouched | Status::AlreadyPatched
         )));
-        assert_eq!(read(), keep_auth, "撤回后应只剩恒开的 Auth 补丁");
-        for p in PATCHES.iter().filter(|p| p.group == Group::Auth) {
+        assert_eq!(read(), keep_auth, "撤回后应只剩恒开的 Auth + Core 补丁");
+        for p in PATCHES
+            .iter()
+            .filter(|p| p.group == Group::Auth || p.group == Group::Core)
+        {
             assert!(read().contains(p.new), "{} 应被恒开保留", p.name);
         }
         assert!(is_patched(&f, &all_off), "全关状态下 is_patched 应为真");
@@ -1487,11 +1666,10 @@ mod tests {
         // 3) 部分开关：只开图表解锁 —— 其余组未启用，charts 打上
         write_pristine(&read()); // 已回到 keep_auth
         let only_charts = Flags {
-            ads_block: false,
+            adblock: false,
             charts_unlock: true,
             study_on_study: false,
             drawings_unlock: false,
-            silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
             alerts: false,
@@ -1501,7 +1679,9 @@ mod tests {
         assert!(now.contains(charts.new));
         for p in PATCHES
             .iter()
-            .filter(|p| p.group != Group::Charts && p.group != Group::Auth)
+            .filter(|p| {
+                p.group != Group::Charts && p.group != Group::Auth && p.group != Group::Core
+            })
         {
             assert!(!now.contains(p.new), "{} 不应被打上", p.name);
         }
@@ -1659,8 +1839,19 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let idx = dir.join("index.js");
 
-        // 用所有补丁的 old 拼出一份"原始" index.js
-        let pristine: String = PATCHES.iter().map(|p| p.old).collect::<Vec<_>>().join("\n");
+        // 用所有补丁的 old 拼出一份"原始" index.js。
+        // 推广补丁的 old 只是壳内空位、不是独立语句，跳过（由 Core 的 old 提供落点）。
+        let promo_name = PATCHES
+            .iter()
+            .find(|p| p.new.contains("__tvxGuard"))
+            .map(|p| p.name)
+            .expect("页内推广浮层补丁应在补丁集里");
+        let pristine: String = PATCHES
+            .iter()
+            .filter(|p| p.name != promo_name)
+            .map(|p| p.old)
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&idx, &pristine).unwrap();
 
         let on = Flags::default();
@@ -1677,11 +1868,10 @@ mod tests {
 
         // 撤回：开关全关后逐条还原（Auth 恒开，跳过它）
         let off = Flags {
-            ads_block: false,
+            adblock: false,
             charts_unlock: false,
             study_on_study: false,
             drawings_unlock: false,
-            silence_paywalls: false,
             no_auto_update: false,
             auto_recover: false,
             alerts: false,

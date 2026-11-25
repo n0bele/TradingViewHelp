@@ -168,10 +168,11 @@ fn default_true() -> bool {
     true
 }
 
-/// tvx 的持久化配置。功能开关对应六条需求：
-/// 拦截广告网络 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 各自独立；
-/// 指标数量 / 布局保存 / 警报由服务端强制（实测拒绝码由服务端下发，
-/// 客户端无法解除），只能静音其升级弹窗，故共用 `silence_paywalls` 一个开关。
+/// tvx 的持久化配置。功能开关对应五条需求：
+/// 拦截广告弹窗 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 各自独立；
+/// 「拦截广告弹窗」是一个功能：网络层拦广告域名 + 壳层不再开充值窗口 + 图表页内推广浮层
+/// 就地隐藏，三者对用户是同一件事，共用一个开关（旧版的 ads_block / silence_paywalls
+/// 已合并；JSON 键沿用 `ads_block`，老配置不用迁移）。
 /// `alerts` 是本地指标报警，与服务端报警配额无关，单独一个开关。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -179,8 +180,9 @@ pub struct Config {
     pub lang: Lang,
     #[serde(default)]
     pub custom_source: Option<String>,
-    #[serde(default = "default_true")]
-    pub ads_block: bool,
+    /// 拦截广告弹窗：广告域名 + 订阅/充值窗口 + 页内推广浮层
+    #[serde(default = "default_true", rename = "ads_block")]
+    pub adblock: bool,
     #[serde(default = "default_true")]
     pub charts_unlock: bool,
     #[serde(default = "default_true")]
@@ -188,8 +190,6 @@ pub struct Config {
     /// 单张图表的绘图数量上限（free 档 30，客户端 gate）
     #[serde(default = "default_true")]
     pub drawings_unlock: bool,
-    #[serde(default = "default_true")]
-    pub silence_paywalls: bool,
     #[serde(default = "default_true")]
     pub no_auto_update: bool,
     /// 断线自愈：连接被服务端关闭时自动点恢复 / 重载页面
@@ -205,11 +205,10 @@ impl Default for Config {
         Self {
             lang: Lang::Zh,
             custom_source: None,
-            ads_block: true,
+            adblock: true,
             charts_unlock: true,
             study_on_study: true,
             drawings_unlock: true,
-            silence_paywalls: true,
             no_auto_update: true,
             auto_recover: true,
             alerts: true,
@@ -220,11 +219,10 @@ impl Default for Config {
 impl Config {
     pub fn flags(&self) -> patch::Flags {
         patch::Flags {
-            ads_block: self.ads_block,
+            adblock: self.adblock,
             charts_unlock: self.charts_unlock,
             study_on_study: self.study_on_study,
             drawings_unlock: self.drawings_unlock,
-            silence_paywalls: self.silence_paywalls,
             no_auto_update: self.no_auto_update,
             auto_recover: self.auto_recover,
             alerts: self.alerts,

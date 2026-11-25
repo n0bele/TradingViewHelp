@@ -947,11 +947,10 @@ impl App {
                             patch::install_assets(dir, &flags)?;
                         }
                         push(lang.log_switches(
-                            flags.ads_block,
+                            flags.adblock,
                             flags.charts_unlock,
                             flags.study_on_study,
                             flags.drawings_unlock,
-                            flags.silence_paywalls,
                             flags.no_auto_update,
                         ));
                         for &(name, st) in &report.items {
@@ -1366,8 +1365,8 @@ impl eframe::App for App {
                 ui.label(egui::RichText::new(t.features).small().weak());
                 let mut toggled = false;
                 if ui
-                    .checkbox(&mut self.cfg.ads_block, t.cb_ads)
-                    .on_hover_text(t.cb_ads_hint)
+                    .checkbox(&mut self.cfg.adblock, t.cb_adblock)
+                    .on_hover_text(t.cb_adblock_hint)
                     .changed()
                 {
                     toggled = true;
@@ -1389,13 +1388,6 @@ impl eframe::App for App {
                 if ui
                     .checkbox(&mut self.cfg.drawings_unlock, t.cb_drawings)
                     .on_hover_text(t.cb_drawings_hint)
-                    .changed()
-                {
-                    toggled = true;
-                }
-                if ui
-                    .checkbox(&mut self.cfg.silence_paywalls, t.cb_silence)
-                    .on_hover_text(t.cb_silence_hint)
                     .changed()
                 {
                     toggled = true;
