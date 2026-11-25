@@ -10,14 +10,15 @@ pub static ZH: S = S {
     no_tv_alert: "⚠ 未检测到 TradingView，请先安装 TradingView 桌面版后再使用本工具。\n安装完成后回到这里，点「重新检测」。",
     rescan: "重新检测",
     copy_none: "● 副本未生成",
-    copy_none_hint: "点右侧「生成 / 更新副本」",
+    copy_none_hint: "在下方「账号」里点「添加账号」会自动生成",
     copy_ok: "● 副本 {v} · 补丁完好",
     copy_ok_hint: "锚点按该版本 index.js 提取并端到端实测；改开关会自动重打补丁",
     copy_bad: "● 副本 {v} · 补丁异常",
-    copy_bad_hint: "点右侧「生成 / 更新副本」修复",
+    copy_bad_hint: "拨一下任意开关会按当前设置重打补丁；还不行就「全部停止」后删掉 \
+                    %USERPROFILE%\\.tvx 重来（账号要重新登录）",
     copy_stale: "● 副本 {v} · 旧包未清除",
     copy_stale_hint: "副本里还留着旧包 app.asar，客户端会优先加载它，补丁一条都不会生效。\n\
-                     拨动任意开关、或点右侧「生成 / 更新副本」，都会自动清掉它；\n\
+                     拨动任意开关就会自动清掉它；\n\
                      客户端没关的话先点「全部停止」，否则文件被占用删不掉。",
     copy_unverified: "● 副本 {v} · 未验证（锚点按 {refv} 校验）",
     copy_unverified_hint: "补丁锚点是字面代码串，压缩标识符随版本漂移；失配时构建会显式报错，不会打一半",

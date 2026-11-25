@@ -10,15 +10,16 @@ pub static EN: S = S {
     no_tv_alert: "⚠ TradingView is not installed. Please install the TradingView desktop app before using this tool.\nAfter installing, come back and click \"Rescan\". If it is installed but not detected, specify the install folder manually below.",
     rescan: "Rescan",
     copy_none: "● Copy not built",
-    copy_none_hint: "Click \"Build / Update copy\" on the right",
+    copy_none_hint: "Add an account below — the copy is generated automatically",
     copy_ok: "● Copy {v} · patches OK",
     copy_ok_hint: "Anchors extracted from this version's index.js and verified end-to-end; toggling options re-applies automatically",
     copy_bad: "● Copy {v} · patches broken",
-    copy_bad_hint: "Click \"Build / Update copy\" to repair",
+    copy_bad_hint: "Toggle any option to re-apply with the current settings; if that fails, \
+                    click \"Stop all\" and delete %USERPROFILE%\\.tvx to start over \
+                    (accounts must log in again)",
     copy_stale: "● Copy {v} · stale package",
     copy_stale_hint: "The copy still contains the original app.asar, which the client loads first — \
-                      no patch will take effect.\nToggle any option or click \"Build / Update copy\" and it \
-                      gets removed automatically;\nif the client is running, click \"Stop all\" first, \
+                      no patch will take effect.\nToggle any option and it gets removed automatically;\nif the client is running, click \"Stop all\" first, \
                       otherwise the file stays locked.",
     copy_unverified: "● Copy {v} · unverified (anchors checked against {refv})",
     copy_unverified_hint: "Patch anchors are literal code strings; minified identifiers drift between versions. On mismatch the build fails loudly instead of half-applying",
