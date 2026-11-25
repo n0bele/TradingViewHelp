@@ -224,7 +224,7 @@ const DRAWINGS_UNLOCK: &str = "(function(){try{if(window.__tvxDraw)return;window
 /// 当前版本：重试次数写在 sessionStorage 里，跨页面重载仍然有效——
 /// 否则 reload 后计数归零，服务端一直拒绝时会变成每 4 秒重载一次的循环。
 #[cfg(test)]
-const DISCONNECT_RECOVER: &str = "(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();";
+const DISCONNECT_RECOVER: &str = "(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();";
 
 /// 注入到图表页的「页内推广浮层拦截器」（v2：插入即拦，不再轮询）。
 ///
@@ -265,7 +265,7 @@ const DISCONNECT_RECOVER: &str = "(function(){try{if(window.__tvxRecover)return;
 /// 客户端没有可解除的 gate——想真正多开指标只能升级方案，这里不改变任何配额。
 /// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
 #[cfg(test)]
-const PROMO_GUARD: &str = "(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|获取更多连接|关闭了这个连接|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();";
+const PROMO_GUARD: &str = "(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();";
 
 /// 上一版（计数只存内存，重载即清零）。已打过的副本要先迁移到当前版本。
 /// handleDomReady 段的开头（补丁 new 与迁移文本都必须以它起头）
@@ -278,11 +278,34 @@ const DOM_READY_HEAD: &str =
 const RECOVER_SCRIPT_TAIL: &str = "\").catch((()=>{})),";
 const RECOVER_URL_TAIL: &str = "this.url&&";
 
-/// 「页内推广浮层」注入段的边界：`.on("dom-ready",…executeJavaScript("` 到 `").catch((()=>{}))}))`。
-/// 脚本本体每升级一次（v1 轮询点关闭 → v2 插入即拦）文本就全变，靠 old 精确匹配必然失配，
-/// 所以和断线段一样按边界整段替换。
-const PROMO_SEG_HEAD: &str = ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"";
-const PROMO_SEG_TAIL: &str = "\").catch((()=>{}))}))";
+/// 「页内推广浮层」注入段的起点：当前版（v3）与上一版（v2）。
+/// 脚本本体每升级一次（v1 轮询点关闭 → v2 插入即拦 → v3 视图就绪重试）文本就全变，
+/// 靠 old 精确匹配必然失配，所以和断线段一样按边界整段替换。
+///
+/// **v3 修的是实测确认的空窗**：`.on("dom-ready",…)` 里原来的写法是
+/// `this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript("…")`
+/// —— 首次 dom-ready 触发时 `browserViewMember` 还是 null（`isBrowserViewValid()` 为假），
+/// 整段注入被跳过且**没有任何重试**；全文件 dom-ready 只挂这一处、每次启动只触发一次，
+/// 于是启动后 48~56 秒（两次实测）页面处于"一条注入都没打上"的状态，推广弹窗正好在这段
+/// 时间窗里出现。v3 把回调改成轮询：`isBrowserViewValid()` 一为真就执行
+/// `handleDomReady()` + 注入了，最多等 300 秒（1200 × 250ms），并在主进程 stdout 留一行
+/// 日志便于事后核对。
+/// `{g}` 是"代次"令牌：`dom-ready` 若再触发一次（导航），新的循环把 `__tvxDR` 加一，
+/// 旧的循环下一拍就退出——保证同一个页面只执行一次 `handleDomReady`（改动前也是如此）。
+const PROMO_SEG_HEAD: &str = ".on(\"dom-ready\",(()=>{var t=this,n=0,g=t.__tvxDR=(t.__tvxDR||0)+1;(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())return n>0&&console.log(\"[tvx] dom-ready ready after \"+n+\" retries\"),t.handleDomReady(),void t.executeJavaScript(\"";
+/// 上一版（v2）的段起点，只用于把已装好的副本迁移到 v3。
+const PROMO_SEG_HEAD_V2: &str =
+    ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"";
+/// 段起点的识别前缀（含 v3 早期形态：没有代次令牌的那一版）。
+/// 识别用前缀而不是整段段首，是为了让 v3 自身的小改动（加日志、加令牌）都能被认出来。
+const PROMO_SEG_HEADS: &[&str] = &[
+    PROMO_SEG_HEAD,
+    ".on(\"dom-ready\",(()=>{var t=this",
+    PROMO_SEG_HEAD_V2,
+];
+/// 注入脚本在 `.on("dom-ready",…)` 里的收尾标记：从这里往后按括号配平即可算出段尾
+///（关闭箭头函数 + 关闭 `.on(` 两层括号），不必把各版尾巴抄成常量——抄了就一定漂移。
+const PROMO_SEG_END_MARK: &str = "\").catch((()=>{}))";
 
 const LEGACY_RECOVER_V1: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript("(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;var n=0,last=0,waits=[15000,60000,300000];function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<600&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(/恢复连接|重新连接|Restore connection|Reconnect/i.test(t))return b[i]}return null}function tick(){var d=dlg();if(!d)return;d.setAttribute('data-tvx-recovering','1');var b=btn(d);if(b){try{b.click()}catch(e){}}setTimeout(function(){if(!dlg())return;if(n>=3)return;var now=Date.now();if(now-last<(waits[n]||3e5))return;last=now;n++;try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();").catch((()=>{})),this.url&&"#;
 
@@ -291,10 +314,16 @@ const LEGACY_RECOVER_V1: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(
 /// 否则新版 old 锚点对不上，会被判成"锚点失配"而整体失败。
 const LEGACY_HIDE_DISCONNECT: &str = r#"handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript("(function(){try{if(window.__tvxNoDisconnect)return;window.__tvxNoDisconnect=1;var K=/恢复连接|获取更多连接|关闭了这个连接|We closed this connection|Restore connection|Get more connections/i;function s(){var n=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<n.length;i++){var e=n[i],t=e.textContent||'';if(t.length<600&&K.test(t)){e.style.display='none';e.setAttribute('data-tvx-hidden','1')}}}setInterval(s,800)}catch(e){}})();").catch((()=>{})),this.url&&"#;
 
+/// 上一版「页面开窗过滤」写进副本的文本（过滤正则里还没有 `paywall` / `pro-plans`）。
+/// 这与注入脚本无关，但同样属于"副本里已是旧文本、新 old 锚点对不上"的情形：
+/// 条件插在 `return;` 与 `const o` 之间，原来的 old 已经被拆开，只能按整条换。
+const LEGACY_OPEN_WINDOW_V1: &str = "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial)/i.test(String(n)))return;const o={url:n};";
+
 /// 需要就地迁移的历史注入文本：(所属补丁名, 旧文本)
 const LEGACY: &[(&str, &str)] = &[
     ("断线自动恢复", LEGACY_HIDE_DISCONNECT),
     ("断线自动恢复", LEGACY_RECOVER_V1),
+    ("页面请求开窗时拦截充值/推广链接", LEGACY_OPEN_WINDOW_V1),
 ];
 
 pub const PATCHES: &[Patch] = &[
@@ -326,8 +355,11 @@ pub const PATCHES: &[Patch] = &[
         // 页面（web app）可以通过 IPC OPEN_NEW_WINDOW 让壳开任意 URL 的新窗口，
         // 这条路径之前没有任何限制——定时弹出的"充值窗口"就是从这里来的。
         // 只拦 URL 命中充值/推广关键字的请求，正常业务开窗（K 线弹窗、分享等）不受影响。
+        // 壳里两个付费墙 URL 常量（`/desktop/paywall/`、`/pro-plans/features/`）原先不在
+        // 正则里——实测三条开窗请求都进了 handler，是 webview 侧的 URL 白名单兜住才没开窗。
+        // 白名单不是我们的代码，不能当成保险，这里补上 `paywall` / `pro-plans`。
         old: "null==n||!1===(0,M.HU)(n))return;const o={url:n};",
-        new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial)/i.test(String(n)))return;const o={url:n};",
+        new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial|paywall|pro-?plans)/i.test(String(n)))return;const o={url:n};",
     },
     Patch {
         name: "页内推广浮层插入即拦截",
@@ -339,8 +371,14 @@ pub const PATCHES: &[Patch] = &[
         // 判定发生在浮层已经画出来之后，本质上仍是"事后清理"。
         // v2 改成 MutationObserver：节点插入 DOM 的微任务里就判定并隐藏，命中即不上屏；
         // 识别只看不翻译的结构与品牌词，不再要求某种语言的标题文案。
+        // v3 把 dom-ready 回调改成"等 BrowserView 就绪再注入"（详见 PROMO_SEG_HEAD 的注释）：
+        // 原来 `isBrowserViewValid()&&…` 在首次 dom-ready 时为假，整段注入被跳过且不重试，
+        // 实测启动后 48~56 秒页面没有任何注入——这段空窗期正好是推广弹窗出现的时间。
+        // 另：DIS（"别藏，交给断线自愈"）原先把「获取更多连接」也算断线文案，而连接数付费墙
+        // 的标题就是「获取更多连接，同时查看更多图表」→ 被当成断线直接放行（已造 DOM 复现）。
+        // 现在 DIS 只认真正的断线句（关闭了这个连接 / 连接已关闭 / We closed this connection…）。
         old: ".on(\"dom-ready\",(()=>{this.handleDomReady()}))",
-        new: ".on(\"dom-ready\",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&this.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|获取更多连接|关闭了这个连接|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}))}))",
+        new: ".on(\"dom-ready\",(()=>{var t=this,n=0,g=t.__tvxDR=(t.__tvxDR||0)+1;(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())return n>0&&console.log(\"[tvx] dom-ready ready after \"+n+\" retries\"),t.handleDomReady(),void t.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}));n<1200?((0===n&&console.log(\"[tvx] dom-ready: browser view not ready, retrying\"),n++,setTimeout(r,250))):console.warn(\"[tvx] dom-ready: browser view still invalid after 300s\")})()}))",
     },
     Patch {
         name: "广告/追踪域名网络拦截",
@@ -423,9 +461,14 @@ pub const PATCHES: &[Patch] = &[
         // 现在改成自愈：先尝试点「恢复连接 / Reconnect」，4 秒仍未恢复就重载页面；
         // 之后按 15s/60s/5min 再试，最多 4 次，之后停手并让弹窗留着（把原因还给人）。
         // 连续 60 秒无弹窗则清零计数，避免用满次数后整个标签页不再自愈。
+        // `K`（弹窗文案）里**不再包含「获取更多连接 / Get more connections」**：那是
+        // 连接数付费墙的标题（`PAYWALL_CONNECTIONS_LIMIT`），留着会让自愈把付费墙当成断线，
+        // 找不到「恢复连接」按钮就重载页面，最多 4 次——用户看到的是"莫名重载"。
+        // 真正的断线框标题是「关闭了这个连接 / We closed this connection」，两条都还在，
+        // 且按这条路径已经实弹验证过（假断线框 → 按钮点击 1 次、重载 1 次）。
         // 这不改变服务端并发配额——配额在服务端强制，客户端没有可改的 gate。
         old: "handleDomReady(){this.isBrowserViewValid()&&(\"\"!==this.url&&",
-        new: "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|获取更多连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Get more connections|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();\").catch((()=>{})),\"\"!==this.url&&",
+        new: "handleDomReady(){this.isBrowserViewValid()&&(this.executeJavaScript(\"(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();\").catch((()=>{})),\"\"!==this.url&&",
     },
     Patch {
         name: "放宽离线判定超时",
@@ -615,12 +658,62 @@ fn recover_segment_range(src: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// 定位「页内推广浮层」注入段的字节区间（PROMO_SEG_HEAD … PROMO_SEG_TAIL）。
+/// 定位「页内推广浮层」注入段的字节区间（PROMO_SEG_HEAD … 段尾）。
+///
+/// 起点认两版：当前的 v3（带视图就绪重试）或历史的 v2。段尾不按字面抄：
+/// 从 `.on(` 的起点整体按括号配平走到深度归零（跳过字符串字面量），
+/// 中间插了什么语句（v2 什么都没有，v3 有重试用的 IIFE）都不影响。
+/// 抄一段尾巴就是多一处漂移点——改一次重试文案就会把"升级旧副本"搞坏。
 fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
-    let start = src.find(PROMO_SEG_HEAD)?;
-    let body = start + PROMO_SEG_HEAD.len();
-    let tail = src[body..].find(PROMO_SEG_TAIL)?;
-    Some((start, body + tail + PROMO_SEG_TAIL.len()))
+    let open = ".on(\"dom-ready\",(()=>{";
+    let (start, body) = {
+        let mut from = 0usize;
+        loop {
+            let s = from + src[from..].find(open)?;
+            let rest = &src[s..];
+            if let Some(h) = PROMO_SEG_HEADS.iter().find(|h| rest.starts_with(**h))
+            {
+                break (s, s + h.len());
+            }
+            from = s + open.len();
+        }
+    };
+    // 段内必须有注入脚本的收尾标记，否则不是我们的注入段
+    if !src[body..].contains(PROMO_SEG_END_MARK) {
+        return None;
+    }
+    // 括号配平（跳过字符串字面量：注入脚本里全是引号里的括号）
+    let bytes = src.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut esc = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if let Some(q) = quote {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'"' | b'\'' | b'`' => quote = Some(c),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((start, i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// 按开关对解包后的 index.js 应用/撤回补丁。任一处匹配数不为 1 就整体失败，
@@ -996,6 +1089,19 @@ mod tests {
         for s in ["Verbindung wiederherstellen", "再接続", "Переподключиться", "Reconectar"] {
             assert!(DISCONNECT_RECOVER.contains(s), "重连按钮文案缺少 {s}");
         }
+        // 「获取更多连接 / Get more connections」是连接数付费墙的标题，不是断线文案：
+        // 留着会把付费墙判成断线（找不到重连按钮 → 重载，最多 4 次）。已实测复现。
+        assert!(
+            !DISCONNECT_RECOVER.contains("获取更多连接"),
+            "断线文案不能再吃付费墙标题"
+        );
+        assert!(
+            !DISCONNECT_RECOVER.contains("Get more connections"),
+            "断线文案不能再吃付费墙标题（en）"
+        );
+        // 但真正的断线句必须还在（否则自愈失效）
+        assert!(DISCONNECT_RECOVER.contains("关闭了这个连接"));
+        assert!(DISCONNECT_RECOVER.contains("We closed this connection"));
     }
 
     #[test]
@@ -1021,16 +1127,43 @@ mod tests {
         // 断线提示交给自愈，不能被当推广藏掉
         assert!(PROMO_GUARD.contains("恢复连接"));
         assert!(PROMO_GUARD.contains("if(DIS.test(t))return 0"));
+        // 但 DIS 不能再认「获取更多连接」——那是连接数付费墙的标题（实测放过）
+        assert!(!PROMO_GUARD.contains("获取更多连接"));
+        assert!(!PROMO_GUARD.contains("Get more connections"));
+        // v3：dom-ready 回调里等 BrowserView 就绪再注入（否则启动后有一段无注入空窗）
+        assert!(p.new.starts_with(PROMO_SEG_HEAD));
+        assert!(p.new.contains("(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())"));
+        assert!(p.new.contains("browser view not ready, retrying"));
+        assert!(
+            p.new.rsplit_once(PROMO_SEG_END_MARK).is_some(),
+            "段尾标记必须存在（promo_segment_range 靠它定位段尾）"
+        );
     }
 
-    /// 历史注入文本（只隐藏版 / 只存内存计数的 v1）：apply() 必须能就地升级成当前脚本，
-    /// 而不是报"锚点失配"。这是升级路径的回归测试。
-    /// LEGACY 里的文本必须是"完整锚点段"——apply() 拿 p.new 整段去替换它。
+    /// 历史注入文本（只隐藏版 / 只存内存计数的 v1 / 上一版开窗过滤）：apply() 必须能就地
+    /// 升级成当前文本，而不是报"锚点失配"。这是升级路径的回归测试。
+    /// 断线自愈那两条必须是"完整锚点段"——apply() 拿 p.new 整段去替换它。
     /// 若只存脚本本体，替换后新段会嵌在脚本位置，得到重复的 handleDomReady，
     /// 主进程加载即语法错误（真实踩过：TradingView 弹出只有 "Error" 的窗口）。
+    /// 开窗过滤那条不用整段：它的位置在 `return;` 与 `const o` 之间，替换的是整条语句。
     #[test]
     fn legacy_entries_are_full_segments() {
         for (name, legacy) in LEGACY {
+            let p = PATCHES
+                .iter()
+                .find(|p| p.name == *name)
+                .unwrap_or_else(|| panic!("{name}：LEGACY 指向了不存在的补丁"));
+            assert_ne!(*legacy, p.new, "{name}：历史文本不能等于当前文本");
+            if p.group != Group::Recover {
+                // 插入式补丁：旧文本 = 原锚点 + 插入的条件，所以锚点同时是首尾两端
+                // 插入式补丁的历史文本 = 原锚点的前段 + 插入的条件 + 原锚点的后段，
+                // 所以只校验首尾各 20 字符仍在（中间必然被插入了东西）。
+                let head: String = p.old.chars().take(20).collect();
+                let tail: String = p.old.chars().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
+                assert!(legacy.starts_with(&head), "{name}：历史文本的首段必须来自原锚点");
+                assert!(legacy.ends_with(&tail), "{name}：历史文本的尾段必须来自原锚点");
+                continue;
+            }
             assert!(
                 legacy.starts_with(DOM_READY_HEAD),
                 "{name}：必须以 handleDomReady 段开头"
@@ -1130,7 +1263,9 @@ mod tests {
         assert!(!after.contains("__tvxPromo"), "v1 脚本应被整段换掉");
         assert!(after.contains("__tvxGuard"), "应迁移成 v2");
         assert_eq!(after.matches(PROMO_SEG_HEAD).count(), 1, "注入段必须只有一处");
-        assert_eq!(after.matches(PROMO_SEG_TAIL).count(), 1, "注入段尾巴必须只有一处");
+        // 尾巴标记 `"` + `.catch` 在别的注入补丁里也有（多图表/指标/绘图/断线），
+        // 这里只认 v3 独有的重试语句，确保注入段没有被复制成两份。
+        assert_eq!(after.matches("browser view not ready, retrying").count(), 1, "v3 重试日志必须只有一处");
         assert!(is_patched(&f, &Flags::default()));
 
         // 关掉「屏蔽充值弹窗」：整段回退成原始锚点
@@ -1152,10 +1287,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("index.js");
 
-        for (_, legacy) in LEGACY {
+        for (name, legacy) in LEGACY {
             let mut src = String::new();
             for p in PATCHES {
-                if p.group == Group::Recover {
+                if p.name == *name {
                     src.push_str(legacy);
                 } else {
                     src.push_str(p.new);
@@ -1192,6 +1327,88 @@ mod tests {
         let after = fs::read_to_string(&f).unwrap();
         assert!(after.contains(recover.old), "关掉后应回到原始断点锚点");
         assert!(!after.contains(DISCONNECT_RECOVER));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// v2（dom-ready 直连注入）→ v3（先等 BrowserView 就绪再注入）：已装好的副本里是 v2 文本，
+    /// 段起点已经换成 `var t=this…`，但段首的 `.on("dom-ready",(()=>{` 还在——
+    /// 迁移必须认出这个旧起点并整段替换，否则用户升级后又要手工删副本。
+    #[test]
+    fn v2_promo_segment_is_migrated_to_v3() {
+        let dir = std::env::temp_dir().join("tvx-patch-promo-v2-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("index.js");
+
+        let p = PATCHES
+            .iter()
+            .find(|q| q.new.contains("__tvxGuard"))
+            .expect("页内推广浮层补丁应在补丁集里");
+        let guard = p
+            .new
+            .strip_prefix(PROMO_SEG_HEAD)
+            .and_then(|r| r.rsplit_once(PROMO_SEG_END_MARK))
+            .map(|(body, _)| body)
+            .expect("当前补丁文本必须符合段头 + 脚本 + 段尾标记的结构");
+        // 显式拼接，避免 format! 的 `}}` 转义把收尾括号算错一位
+        let mut v2 = String::new();
+        v2.push_str(PROMO_SEG_HEAD_V2);
+        v2.push_str(guard);
+        v2.push_str(PROMO_SEG_END_MARK);
+        v2.push_str("}))");
+
+        let src: String = PATCHES
+            .iter()
+            .map(|q| if q.name == p.name { v2.as_str() } else { q.new })
+            .collect();
+        fs::write(&f, &src).unwrap();
+
+        let report = apply(&f, &Flags::default()).unwrap();
+        assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(!after.contains(PROMO_SEG_HEAD_V2), "v2 段首应被换掉");
+        assert!(after.contains(PROMO_SEG_HEAD), "应迁移成 v3（带就绪重试）");
+        assert_eq!(after.matches("browser view not ready, retrying").count(), 1);
+        assert!(is_patched(&f, &Flags::default()));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 上一版「页面开窗过滤」（正则里没有 paywall / pro-plans）必须能就地迁移：
+    /// 副本里是"条件已插在 `return;` 与 `const o` 之间"的旧形态，原锚点已被拆开，
+    /// 靠精确匹配会判成锚点未命中，从而整批失败。
+    #[test]
+    fn former_open_window_filter_is_migrated() {
+        let dir = std::env::temp_dir().join("tvx-patch-openwin-test");
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("index.js");
+
+        let p = PATCHES
+            .iter()
+            .find(|q| q.new.contains("const o={url:n};") && q.new.contains("paywall"))
+            .expect("开窗过滤补丁应在补丁集里");
+        let src: String = PATCHES
+            .iter()
+            .map(|q| {
+                if q.name == p.name {
+                    LEGACY_OPEN_WINDOW_V1
+                } else {
+                    q.new
+                }
+            })
+            .collect();
+        fs::write(&f, &src).unwrap();
+
+        let report = apply(&f, &Flags::default()).unwrap();
+        assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(!after.contains(LEGACY_OPEN_WINDOW_V1), "旧文本应被替换");
+        assert!(after.contains(p.new), "应迁移成当前文本");
+        assert_eq!(after.matches(p.new).count(), 1);
+
+        // 幂等
+        apply(&f, &Flags::default()).unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), after);
 
         let _ = fs::remove_dir_all(&dir);
     }
