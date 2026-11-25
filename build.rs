@@ -1,8 +1,23 @@
-//! 把 assets/icon.ico 作为 exe 图标嵌入（仅 Windows）。
+//! 构建期两件事：
+//! 1) 把 `src/alerts/0*.js` 按序拼成 `$OUT_DIR/alerts-engine.js`（页内报警引擎，共享一个 IIFE）；
+//! 2) 把 assets/icon.ico 作为 exe 图标嵌入（仅 Windows）。
 //! 直接调用系统 Windows SDK 的 rc.exe，不引入额外 crate 依赖。
 //! 找不到 rc.exe 时静默跳过——图标缺失不影响功能，也不该让开源项目在别人机器上编译失败。
 
+/// 页内引擎的分段源码，顺序即拼接顺序（数字前缀决定读的顺序感，这里显式列出保证稳定）。
+const ALERTS_PARTS: &[&str] = &[
+    "00-head.js",
+    "10-chart.js",
+    "20-script.js",
+    "30-rules.js",
+    "40-loop.js",
+    "50-settings.js",
+    "90-boot.js",
+];
+
 fn main() {
+    concat_alerts_engine();
+
     println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=assets/icon.rc");
 
@@ -26,6 +41,24 @@ fn main() {
     match status {
         Ok(s) if s.success() => println!("cargo:rustc-link-arg={}", res),
         _ => println!("cargo:warning=rc.exe 编译图标资源失败，跳过 exe 图标嵌入"),
+    }
+}
+
+fn concat_alerts_engine() {
+    println!("cargo:rerun-if-changed=src/alerts");
+    let mut js = String::new();
+    for part in ALERTS_PARTS {
+        let path = format!("src/alerts/{part}");
+        println!("cargo:rerun-if-changed={path}");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => js.push_str(&text),
+            Err(e) => panic!("读取 {path} 失败：{e}"),
+        }
+    }
+    let out = std::env::var("OUT_DIR").expect("OUT_DIR 由 cargo 提供");
+    let dest = format!("{out}/alerts-engine.js");
+    if let Err(e) = std::fs::write(&dest, &js) {
+        panic!("写入 {dest} 失败：{e}");
     }
 }
 

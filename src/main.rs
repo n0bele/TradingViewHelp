@@ -1,8 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+//! TradingView Desktop 本地助手（单机、无服务端）。
+//!
+//! 分工见各模块文档；`main` 只做三件事：解析命令行 → 执行无头命令 → 否则开界面。
+
 mod app;
-mod browser;
 mod asar;
+mod browser;
+mod cli;
 mod i18n;
 #[cfg(target_os = "macos")]
 mod macos_app;
@@ -15,54 +20,10 @@ mod tray;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-    // 无头维护模式：tvhelper _reapply —— 按当前配置重打托管副本补丁，不启动界面
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "_reapply") {
-        app::reapply_headless();
-        return Ok(());
-    }
-    // 无头构建：tvhelper _build —— 从系统安装构建/重建托管副本（优先已验证版本）
-    if args.iter().any(|a| a == "_build") {
-        app::build_headless();
-        return Ok(());
-    }
-    // 环境自检：tvhelper _doctor —— 打印用户目录/AppData/副本补丁/账号列表，
-    // 并把同一份报告写到 ~/.tvx/doctor.txt。客户端崩在启动阶段时先跑它。
-    if args.iter().any(|a| a == "_doctor") {
-        let report = install::doctor_report();
-        print!("{report}");
-        let path = install::tvx_root().join("doctor.txt");
-        match std::fs::write(&path, &report) {
-            Ok(()) => println!("报告已写入 {}", path.display()),
-            Err(e) => println!("报告写入失败：{e}"),
-        }
-        return Ok(());
-    }
-    // 深链分发：`tvhelper _auth tradingview://...`
-    if args.iter().any(|a| a == "_auth") {
-        if let Some(url) = args.iter().find(|a| a.starts_with("tradingview://")) {
-            profiles::route_auth(url);
-        }
-        return Ok(());
-    }
-
-    // 抓取被商店版抢走的授权回调：`tvhelper _capture-handoff [秒数]`
-    if args.iter().any(|a| a == "_capture-handoff") {
-        let secs = args
-            .iter()
-            .filter_map(|a| a.parse::<u32>().ok())
-            .next()
-            .unwrap_or(20);
-        match profiles::capture_handoff_once(secs) {
-            Some((pid, url)) => println!("已接管回调 PID={pid} URL={url}"),
-            None => println!("窗口期内没有捕获到回调"),
-        }
-        return Ok(());
-    }
-
-    // 恢复窗口：`tvhelper _show`（托盘「显示主窗口」用的同一套逻辑，可脚本验证）
-    if args.iter().any(|a| a == "_show") {
-        tray::show_any_tvx_window();
+    // 无头维护路径（版本 / 自检 / 重打补丁 / 构建副本 / 深链 / 托盘唤醒）
+    let cmd = cli::parse(std::env::args().skip(1));
+    if cmd != cli::Cmd::Gui {
+        cli::run(cmd);
         return Ok(());
     }
 
@@ -77,9 +38,9 @@ fn main() -> eframe::Result<()> {
         std::env::remove_var("WAYLAND_SOCKET");
     }
 
-    // 窗口标题跟随上次选择的界面语言
+    // 窗口标题跟随上次选择的界面语言；带上版本号，任务栏也能一眼看出跑的是哪一版
     let cfg = install::load_config();
-    let title = cfg.lang.s().app_title.to_string();
+    let title = format!("{} v{}", cfg.lang.s().app_title, env!("CARGO_PKG_VERSION"));
 
     // 窗口图标（PNG 解码为 RGBA）；失败则用系统默认图标，不影响功能
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))

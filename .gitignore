@@ -23,6 +23,9 @@ Thumbs.db
 *.swp
 *~
 
+# ---- 封面草稿（本地素材，不随仓库分发）----
+/assets/cover-douyin.*
+
 # ---- 临时文件 ----
 /tmp/
 

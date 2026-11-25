@@ -48,6 +48,9 @@ pub struct S {
     pub copy_ok_hint: &'static str,
     pub copy_bad: &'static str,
     pub copy_bad_hint: &'static str,
+    /// 副本里还留着旧包 app.asar：补丁写了也不会执行，单独一条别混进「补丁异常」
+    pub copy_stale: &'static str,
+    pub copy_stale_hint: &'static str,
     pub copy_unverified: &'static str,
     pub copy_unverified_hint: &'static str,
     pub copy_newer: &'static str,
@@ -127,175 +130,11 @@ pub struct S {
     pub confirm_delete: &'static str,
 }
 
-static ZH: S = S {
-    app_title: "TradingView 助手",
-    subtitle: "多账号 · 本地补丁",
-    installed_at: "安装在",
-    no_tv: "未检测到 TradingView",
-    no_tv_alert: "⚠ 未检测到 TradingView，请先安装 TradingView 桌面版后再使用本工具。\n安装完成后回到这里，点「重新检测」。",
-    rescan: "重新检测",
-    copy_none: "● 副本未生成",
-    copy_none_hint: "点右侧「生成 / 更新副本」",
-    copy_ok: "● 副本 {v} · 补丁完好",
-    copy_ok_hint: "锚点按该版本 index.js 提取并端到端实测；改开关会自动重打补丁",
-    copy_bad: "● 副本 {v} · 补丁异常",
-    copy_bad_hint: "点右侧「生成 / 更新副本」修复",
-    copy_unverified: "● 副本 {v} · 未验证（锚点按 {refv} 校验）",
-    copy_unverified_hint: "补丁锚点是字面代码串，压缩标识符随版本漂移；失配时构建会显式报错，不会打一半",
-    copy_newer: "· 发现新版 {v}（已验证）",
-    copy_newer_hint: "系统里的 TradingView 已升到 {v}，该版本在白名单里，重建副本后仍是完整支持的状态；不重建也能继续用当前副本",
-    btn_rebuild: "重建副本",
-    env_warn: "环境异常，启动会被阻止：",
-    btn_doctor: "自检",
-    features: "功能",
-    cb_adblock: "拦截广告弹窗",
-    cb_adblock_hint: "广告域名直接拦掉；充值/订阅窗口不再打开，图表里的推广浮层就地隐藏",
-    cb_charts: "多图表布局解锁",
-    cb_charts_hint: "客户端 gate：free 档上限 1，注入后放行",
-    cb_study: "指标叠加解锁",
-    cb_study_hint: "客户端 gate：子指标上限 free 档 1，注入后放大",
-    cb_drawings: "绘图不限",
-    cb_drawings_hint: "客户端 gate：free 档单张图表上限 30 个绘图（隐藏/锁定的也算，删除立即释放），注入后不再拦。实测建到 40 条不弹框，且超额部分服务端照常存档、重载后仍在",
-    cb_recover: "断线自动恢复",
-    cb_recover_hint: "检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复，4 秒未恢复就重载页面，之后按 15 秒 / 1 分钟 / 5 分钟再试（最多 4 次，仍失败就保留弹窗）；连续 1 分钟无弹窗则重新计数。只做恢复，不改变服务端并发配额",
-    cb_noupdate: "禁用自动更新",
-    cb_noupdate_hint: "去掉启动时的更新检查，手动检查不受影响",
-    cb_alerts: "本地指标报警",
-    cb_alerts_hint: "在图表页加一个「报警」按钮：按当前图表的品种/周期/指标设条件，命中后发系统通知或邮件。只在本机运行，不占用也不绕过服务端报警配额",
-    usage: "使用说明",
-    usage_note: "每个账号用独立档案（独立配置目录）；同一账号也能开多个窗口，但可能撞服务端并发限制，出现行情停更就关掉一个",
-    tray_show: "显示主窗口",
-    tray_quit: "退出",
-    launching: "启动中… {s}s",
-    auto_build: "还没有副本：点「添加」会先自动生成副本，再创建账号（首次约 1 分钟）。",
-    tray_fail: "⚠ 托盘创建失败：关闭窗口将直接退出（可看日志排查）",
-    step_launch: "点「启动」",
-    step_login: "在 TradingView 窗口里登录",
-    cancel: "取消",
-    kind_store: "Microsoft Store",
-    kind_portable: "本地安装",
-    kind_custom: "手动指定",
-    tag_verified: "● 已验证",
-    tag_unverified: "未验证",
-    warn_unverified_src: "⚠ 所选版本 {v} 不在已验证名单里：补丁锚点按 {refv} 提取，某些开关可能失效。副本会照常生成，打不上的条目会逐条列在日志里。",
-    chk_allow_unverified: "我了解风险，仍要用该版本构建副本",
-    btn_rebuild_anyway: "仍要重建（未验证）",
-    copy_newer_unverified: "· 发现新版 {v}（未验证，不建议升级副本）",
-    copy_newer_unverified_hint: "系统里的 TradingView 已升到 {v}，但补丁锚点是按 {refv} 提取的，新版 JS 的压缩标识符很可能已变化。当前副本自包含，客户端升级不会影响它，可以继续用；除非有明确需要，不必重建。",
-    log: "日志",
-    clear: "清空",
-    accounts: "账号",
-    count: "{n} 个 · {o} 个在线",
-    add: "＋ 添加账号",
-    submit: "添加",
-    launch_all: "全部启动",
-    stop_all: "全部停止",
-    launch_all_hint: "需要先有账号并生成副本",
-    name_label: "账号名",
-    name_hint: "例如 主号 / 小号",
-    empty_title: "还没有账号。",
-    empty_desc: "一个账号 = 一个独立配置目录 = 一份独立登录。\n建两个账号、分别登录不同的 TradingView 账号，它们就能同时在线、同时看盘。",
-    empty_s1: "在上面填个名字（比如「主号」）→ 点「添加」",
-    empty_s2: "账号卡片出现后，点它的「启动」",
-    empty_s3: "在弹出的 TradingView 窗口里登录。要双开就再添加一个账号",
-    online: "在线 · PID {pid}",
-    offline: "未启动",
-    acct_bound: "· 账号 {uid}",
-    acct_dup: "⚠ 与「{name}」同账号",
-    delete: "删除",
-    dir: "目录",
-    stop: "停止",
-    launch: "启动",
-    launch_hint: "先在上方生成免弹窗副本",
-    del_confirm_short: "删除后本地配置目录会被永久删除",
-    creating: "正在创建…",
-    confirm_delete: "确认删除",
-};
+mod en;
+mod zh;
 
-static EN: S = S {
-    app_title: "TradingView Helper",
-    subtitle: "Multi-account · local patches",
-    installed_at: "Installed at",
-    no_tv: "TradingView not found",
-    no_tv_alert: "⚠ TradingView is not installed. Please install the TradingView desktop app before using this tool.\nAfter installing, come back and click \"Rescan\". If it is installed but not detected, specify the install folder manually below.",
-    rescan: "Rescan",
-    copy_none: "● Copy not built",
-    copy_none_hint: "Click \"Build / Update copy\" on the right",
-    copy_ok: "● Copy {v} · patches OK",
-    copy_ok_hint: "Anchors extracted from this version's index.js and verified end-to-end; toggling options re-applies automatically",
-    copy_bad: "● Copy {v} · patches broken",
-    copy_bad_hint: "Click \"Build / Update copy\" to repair",
-    copy_unverified: "● Copy {v} · unverified (anchors checked against {refv})",
-    copy_unverified_hint: "Patch anchors are literal code strings; minified identifiers drift between versions. On mismatch the build fails loudly instead of half-applying",
-    copy_newer: "· newer {v} found (verified)",
-    copy_newer_hint: "The installed TradingView is now {v}, which is on the verified list; rebuilding keeps full support. Keeping the current copy works too",
-    btn_rebuild: "Rebuild copy",
-    env_warn: "Environment problem, launching is blocked:",
-    btn_doctor: "Self-check",
-    features: "Features",
-    cb_adblock: "Block ads & billing popups",
-    cb_adblock_hint: "Ad domains are cancelled; billing/subscription windows never open and in-chart promos stay hidden",
-    cb_charts: "Multi-chart layouts",
-    cb_charts_hint: "Client-side gate: free tier allows 1; the injection lifts it",
-    cb_study: "Study-on-study",
-    cb_study_hint: "Client-side gate: free tier child limit 1; the injection raises it",
-    cb_drawings: "Unlimited drawings",
-    cb_drawings_hint: "Client-side gate: free tier caps one chart at 30 drawings (hidden/locked ones count, deleting frees a slot); the injection stops the check. Verified: 40 drawings on one chart, no paywall, and the extra ones are saved server-side and survive a reload",
-    cb_recover: "Auto-recover on disconnect",
-    cb_recover_hint: "When the site shows a \"connection closed\" / \"restore connection\" dialog, click restore; reload the page if still down after 4s, then retry after 15s / 1min / 5min (max 4 tries, dialog is kept if all fail). The counter resets after 1 minute without a dialog. Recovery only — it cannot raise the server-side connection quota",
-    cb_noupdate: "Disable auto-update",
-    cb_noupdate_hint: "Skip the update check at startup; manual check still works",
-    cb_alerts: "Local indicator alerts",
-    cb_alerts_hint: "Adds an Alerts button on the chart page: conditions on the current chart's symbol/timeframe/indicator, delivered via system notification or email. Runs locally only; it neither uses nor bypasses the server-side alert quota",
-    usage: "How to use",
-    usage_note: "One profile = one isolated config directory; the same account can also run several windows, but may hit the server's concurrency limit - close one if feeds stop updating",
-    tray_show: "Show window",
-    tray_quit: "Quit",
-    launching: "Starting… {s}s",
-    auto_build: "No copy yet: \"Add\" builds the copy first, then creates the account (~1 min the first time).",
-    tray_fail: "⚠ Tray unavailable: closing the window exits the app",
-    step_launch: "click \"Launch\"",
-    step_login: "sign in inside the TradingView window",
-    cancel: "Cancel",
-    kind_store: "Microsoft Store",
-    kind_portable: "Local install",
-    kind_custom: "Manual",
-    tag_verified: "● verified",
-    tag_unverified: "unverified",
-    warn_unverified_src: "⚠ Version {v} is not on the verified list: anchors were extracted from {refv}, so some switches may fail. The copy is still built, and every patch that misses is listed in the log.",
-    chk_allow_unverified: "I understand the risk and want to build from this version anyway",
-    btn_rebuild_anyway: "Rebuild anyway (unverified)",
-    copy_newer_unverified: "· newer {v} found (unverified, not recommended)",
-    copy_newer_unverified_hint: "The installed TradingView is now {v}, but the anchors were extracted from {refv} and minified identifiers likely moved. The managed copy is self-contained, so a client update does not affect it - keep using it unless you have a real reason to rebuild.",
-    log: "Log",
-    clear: "Clear",
-    accounts: "Accounts",
-    count: "{n} total · {o} online",
-    add: "＋ Add account",
-    submit: "Add",
-    launch_all: "Launch all",
-    stop_all: "Stop all",
-    launch_all_hint: "Needs an account and a built copy first",
-    name_label: "Name",
-    name_hint: "e.g. main / alt",
-    empty_title: "No accounts yet.",
-    empty_desc: "One account = one config folder = one login.\nCreate two accounts, sign in with different TradingView accounts, and both can run at the same time.",
-    empty_s1: "Type a name above (e.g. \"main\") → click \"Add\"",
-    empty_s2: "When the card appears, click \"Launch\"",
-    empty_s3: "Sign in inside the TradingView window. Add another account for a second instance.",
-    online: "Online · PID {pid}",
-    offline: "Not running",
-    acct_bound: "· account {uid}",
-    acct_dup: "⚠ same account as \"{name}\"",
-    delete: "Delete",
-    dir: "Folder",
-    stop: "Stop",
-    launch: "Launch",
-    launch_hint: "Build a copy above first",
-    del_confirm_short: "The local config folder will be removed permanently",
-    creating: "Creating…",
-    confirm_delete: "Confirm delete",
-};
+pub use en::EN;
+pub use zh::ZH;
 
 // ------------------------------------------------------------------ 日志与提示
 
@@ -542,6 +381,37 @@ impl Lang {
                 "⚠ {} patch(es) did not apply (upstream code may have changed): {}. Other features are unaffected; rebuild the copy after closing TradingView",
                 failed.len(),
                 failed.join(", ")
+            ),
+        )
+    }
+
+    /// 启动时的体检结论。以前"一切正常"是静默的（日志空白），用户看到空面板会以为
+    /// 检查没跑 / 功能没生效；正常也要留一条能对照的记录。
+    pub fn log_health_ok(&self, ver: &str, copy: &str, ok: usize, all: usize) -> String {
+        self.pick(
+            format!("● v{ver} · 副本 {copy} · {ok}/{all} 补丁已生效，环境正常"),
+            format!("● v{ver} · copy {copy} · {ok}/{all} patches active, environment OK"),
+        )
+    }
+
+    /// 重打补丁前顺手清掉旧包：不告诉用户的话，用户不知道"只是拨了个开关"就把病根除了
+    pub fn log_stale_cleared(&self, path: &str) -> String {
+        self.pick(
+            format!("已清掉残留的旧包 {path}（它会让补丁全部失效）；正在运行的实例重启后生效"),
+            format!("Removed the stale {path} (it silently disabled every patch); running instances take effect after restart"),
+        )
+    }
+
+    /// 清不掉旧包时：说清原因和用户该做什么，别只说"失败"
+    pub fn log_stale_locked(&self, path: &str) -> String {
+        self.pick(
+            format!(
+                "⚠ 旧包 {path} 删不掉，补丁不会生效。请先点「全部停止」关掉客户端\
+                 （必要时在任务管理器结束 TradingView.exe）或把它加入杀软白名单，再拨动任意开关重试"
+            ),
+            format!(
+                "⚠ Could not remove {path}; patches will not take effect. Click \"Stop all\" to close the client \
+                 (or end TradingView.exe in Task Manager), or whitelist it in your antivirus, then toggle any option to retry"
             ),
         )
     }
