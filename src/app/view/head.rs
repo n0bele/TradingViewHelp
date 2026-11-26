@@ -242,13 +242,6 @@ impl App {
                     toggled = true;
                 }
                 if ui
-                    .checkbox(&mut self.cfg.backtest_unlock, t.cb_backtest)
-                    .on_hover_text(t.cb_backtest_hint)
-                    .changed()
-                {
-                    toggled = true;
-                }
-                if ui
                     .checkbox(&mut self.cfg.auto_recover, t.cb_recover)
                     .on_hover_text(t.cb_recover_hint)
                     .changed()

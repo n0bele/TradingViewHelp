@@ -23,10 +23,9 @@
 //! 永不建立），`checkForUpdatesAndNotify` 全 bundle 仅定义未调用；
 //! 设置面板的手动检查/下载路径不受影响。
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 mod data;
 
@@ -44,9 +43,6 @@ pub struct Flags {
     pub study_on_study: bool,
     /// 单张图表的绘图数量上限（free 档 30）：客户端 gate，注入后不限
     pub drawings_unlock: bool,
-    /// 回测报告的客户端判定项：扩展指标 + CSV/XLSX 导出交易记录
-    /// （高精度 K 线 / 每根历史 tick / 深回测由服务端算力决定，不在其中）
-    pub backtest_unlock: bool,
     pub no_auto_update: bool,
     /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
     pub auto_recover: bool,
@@ -62,7 +58,6 @@ impl Default for Flags {
             charts_unlock: true,
             study_on_study: true,
             drawings_unlock: true,
-            backtest_unlock: true,
             no_auto_update: true,
             auto_recover: true,
             alerts: true,
@@ -88,10 +83,6 @@ pub enum Group {
     StudyOnStudy,
     /// 单张图表的绘图数量（DRAWINGS_ON_CHART）客户端 gate 解锁
     Drawings,
-    /// 回测报告的**客户端**判定项解锁：扩展指标、交易记录 CSV/XLSX 导出。
-    /// 高精度历史 K 线 / 每根历史 tick / 深回测由服务端算力决定（实测打开后
-    /// 报告变空 + 升级提示），不放进来。
-    Backtest,
     /// 禁用启动时的自动更新检查
     NoAutoUpdate,
     /// 登录回调直达：每个实例把 `--user-data-dir` 写进 tradingview:// 注册，
@@ -117,7 +108,6 @@ impl Group {
             Group::Charts => f.charts_unlock,
             Group::StudyOnStudy => f.study_on_study,
             Group::Drawings => f.drawings_unlock,
-            Group::Backtest => f.backtest_unlock,
             Group::NoAutoUpdate => f.no_auto_update,
             Group::Auth => true,
             Group::Recover => f.auto_recover,
@@ -338,14 +328,10 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
-                        // 语句边界校验：配平若被正则字面量带偏，这里会落到表达式中间。
-                        // `.` 是合法的：真实代码里 `.on("dom-ready",…)` 后面直接链式
-                        // `.on("did-navigate-in-page",…)`（2026-11-26 实测，段尾下一字节
-                        // 就是 `.`）。早先不认 `.`，老副本升级注入会被判"锚点未命中"，
-                        // 只能整份重建副本才打得进去。
+                        // 语句边界校验：配平若被正则字面量带偏，这里会落到表达式中间
                         let ok = match bytes.get(i + 1) {
                             None => true,
-                            Some(b';' | b',' | b')' | b'.' | b'\n' | b'\r' | b' ' | b'\t') => true,
+                            Some(b';' | b',' | b')' | b'\n' | b'\r' | b' ' | b'\t') => true,
                             _ => false,
                         };
                         return if ok { Some((start, i + 1)) } else { None };
@@ -432,13 +418,17 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
     // 0c) `.on("dom-ready",…)` 回调段按段迁移：v2（注入与 handleDomReady 耦合）与
     //     v3 初版（壳与注入耦合）文本完全不同，靠 old 精确匹配会失配，
     //     还会把已装好的副本判成"锚点未命中"。
-    //     现行形态只有「恒开的 Core 壳」：页内推广浮层的注入脚本 2026-11-26 已整段下线
-    //     （靠文案/面积猜 DOM 去隐藏，误伤远大于收益），老副本里残留的那段必须收回到壳，
-    //     否则用户升级了 tvhelper，旧脚本还在页面上跑。
-    if let Some(core) = PATCHES.iter().find(|p| p.group == Group::Core) {
+    //     现行形态是「恒开的 Core 壳 + 可开关的注入」：旧副本先统一重置成壳，
+    //     注入由下面的常规循环按开关补——既不会把重试壳跟着开关一起带走，
+    //     也不会在关掉开关后残留旧注入。
+    if let (Some(core), Some(p)) = (
+        PATCHES.iter().find(|p| p.group == Group::Core),
+        PATCHES.iter().find(|p| p.new.contains("__tvxGuard")),
+    ) {
         if let Some((s, e)) = promo_segment_range(&src) {
+            let with_guard = core.new.replacen(p.old, p.new, 1);
             let seg = &src[s..e];
-            if seg != core.new {
+            if seg != core.new && seg != with_guard {
                 src.replace_range(s..e, core.new);
             }
         }
@@ -548,45 +538,10 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
 
     // 成功一条就落一条：单条失配只影响该功能，不再把整批补丁和副本一起拖死。
     // 调用方据 ApplyReport::failed 提示"哪几项没生效、建议重建副本"。
-    //
-    // 落盘前必须能解析。补丁是纯文本替换，改坏一个正则字面量就足以让主进程整个起不来
-    // （实测 2026-11-27：往 `/…/` 里塞了没转义的 `/` → `SyntaxError: Invalid regular
-    // expression flags`，客户端一启动就退出，日志目录里空空如也；而 `_doctor` 仍报
-    // 17/17，因为它只检查字符串在不在，不检查改完还能不能跑）。现在改坏了就拒绝写入，
-    // 副本保持原样，用户至少还能启动。
-    if src.len() > 64 * 1024 {
-        let _checked = check_js_syntax(index_js, &src)?;
-    }
     fs::write(index_js, src.as_bytes())
         .with_context(|| format!("写回 {}", index_js.display()))?;
     report.warnings = warnings;
     Ok(report)
-}
-
-/// 校验一段 JS 文本能否被解析。用 `node --check`：机器上没装 node 就跳过（不能因为缺
-/// 工具就拒绝打补丁），装了就必过。失败时给出 node 报的那一行错误。
-pub fn check_js_syntax(index_js: &Path, src: &str) -> Result<bool> {
-    // 必须落在同目录：跨盘复制 2MB 没必要，而且 temp 目录偶尔会被安全软件拦。
-    let dir = index_js.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(".tvx-syntax-check.js");
-    fs::write(&tmp, src.as_bytes())
-        .with_context(|| format!("写入语法检查临时文件 {}", tmp.display()))?;
-    let out = Command::new("node").arg("--check").arg(&tmp).output();
-    let _ = fs::remove_file(&tmp);
-    let Ok(out) = out else {
-        return Ok(false); // 没装 node：跳过
-    };
-    if out.status.success() {
-        return Ok(true);
-    }
-    let err = String::from_utf8_lossy(&out.stderr);
-    let detail = err
-        .lines()
-        .find(|l| l.contains("Error"))
-        .unwrap_or("语法错误")
-        .trim()
-        .to_string();
-    bail!("补丁改完的 index.js 无法解析，已放弃写入（原文件未动）：{detail}");
 }
 
 /// 图表页报警引擎（设置页 + 条件求值）：作为真实 JS 文件随程序分发，
@@ -647,7 +602,7 @@ pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<Vec<String>> {
             // 以前这里静默跳过，副本看起来"构建成功"，实际报警全无。
             warnings.push(format!(
                 "preload 路径不存在（{}），报警桥写不进去——报警功能将不可用。\
-                 处理：「全部停止」后拨一下任意开关重打补丁；仍不行说明该版本目录结构不同，请反馈",
+                 处理：点「生成 / 更新副本」重建；仍不行说明该版本目录结构不同，请反馈",
                 preload.display()
             ));
         } else {

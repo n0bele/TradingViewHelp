@@ -171,19 +171,6 @@ pub fn environment_problems() -> Vec<EnvProblem> {
     out
 }
 
-/// 主进程能不能解析。补丁改坏一个正则字面量就能让客户端起不来，而"补丁 17/17"
-/// 照样是全绿——这个坑实测踩过一次（2026-11-27），必须单列一行。
-fn syntax_line(index_js: &Path) -> String {
-    let Ok(src) = std::fs::read_to_string(index_js) else {
-        return "主进程语法: 读不到 index.js\n".into();
-    };
-    match patch::check_js_syntax(index_js, &src) {
-        Ok(true) => "主进程语法: 通过\n".into(),
-        Ok(false) => "主进程语法: 未装 node，跳过检查\n".into(),
-        Err(e) => format!("主进程语法: 不通过 —— 客户端会起不来\n  {e}\n"),
-    }
-}
-
 /// 一行行拼好的环境报告（`_doctor` 与界面「自检」共用）。
 pub fn doctor_report() -> String {
     let mut s = String::new();
@@ -260,7 +247,6 @@ pub fn doctor_report() -> String {
                     "已生效"
                 }
             ));
-            s.push_str(&syntax_line(&m.index_js()));
             if !failed.is_empty() {
                 s.push_str(&format!("  未生效: {}\n", failed.join("、")));
                 s.push_str(
@@ -278,13 +264,13 @@ pub fn doctor_report() -> String {
                      \x20       （界面可能仍显示“补丁完整”，但所有功能都不生效）\n\
                      怎么做:\n\
                      \x20 1. 关掉所有客户端窗口（或在任务管理器结束 TradingView.exe）\n\
-                     \x20 2. 打开助手，拨动任意一个开关 —— 会自动删掉这个文件并重打补丁\n\
+                     \x20 2. 打开助手，拨动任意一个开关 —— 会自动删掉这个文件；也可点「生成 / 更新副本」\n\
                      \x20 3. 重新启动客户端\n\
                      \x20 若仍删不掉：把该目录加入杀软白名单，或手动删除上面列出的文件后重试\n",
                 );
             }
         }
-        None => s.push_str("副本: 未构建\n  怎么做: 在「账号」里添加一个账号，会自动生成副本\n"),
+        None => s.push_str("副本: 未构建\n  怎么做: 在界面里点「生成 / 更新副本」\n"),
     }
     s
 }

@@ -90,8 +90,7 @@ pub fn create(name: &str, lang: Lang) -> Result<Profile> {
     if dir.exists() {
         bail!(lang.p_dir_exists(&name));
     }
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("创建账号目录 {}", dir.display()))?;
+    fs::create_dir_all(&dir)?;
     Ok(Profile { name, dir })
 }
 

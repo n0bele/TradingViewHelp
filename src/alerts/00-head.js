@@ -32,7 +32,7 @@
         d.id = 'tvxa-bridge-missing';
         d.textContent = '报警不可用';
         d.title = '报警功能未启动：preload 桥缺失。\n' +
-          '处理：关掉客户端 → 在助手里拨一下任意开关（会重打补丁）→ 重新启动。\n' +
+          '处理：关掉客户端 → 在助手里点「生成 / 更新副本」→ 重新启动。\n' +
           '若仍不出现，请把这条红色提示截图反馈（鼠标停在上面就能看到本说明）';
         d.style.cssText = 'position:fixed;right:6px;top:45%;z-index:61;padding:4px 6px;' +
           'border-radius:6px;background:#f23645;color:#fff;cursor:help;' +

@@ -70,8 +70,6 @@ pub struct S {
     pub cb_study_hint: &'static str,
     pub cb_drawings: &'static str,
     pub cb_drawings_hint: &'static str,
-    pub cb_backtest: &'static str,
-    pub cb_backtest_hint: &'static str,
     pub cb_recover: &'static str,
     pub cb_recover_hint: &'static str,
     pub cb_noupdate: &'static str,
@@ -158,7 +156,7 @@ impl Lang {
 
     pub fn log_need_copy(&self) -> String {
         self.pick(
-            "还没有副本：在「账号」里点「添加」，会自动生成".into(),
+            "先在上方「生成 / 更新副本」".into(),
             "Build a copy first (button above)".into(),
         )
     }
