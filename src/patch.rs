@@ -43,6 +43,9 @@ pub struct Flags {
     pub study_on_study: bool,
     /// 单张图表的绘图数量上限（free 档 30）：客户端 gate，注入后不限
     pub drawings_unlock: bool,
+    /// 回测报告的客户端判定项：扩展指标 + CSV/XLSX 导出交易记录
+    /// （高精度 K 线 / 每根历史 tick / 深回测由服务端算力决定，不在其中）
+    pub backtest_unlock: bool,
     pub no_auto_update: bool,
     /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
     pub auto_recover: bool,
@@ -58,6 +61,7 @@ impl Default for Flags {
             charts_unlock: true,
             study_on_study: true,
             drawings_unlock: true,
+            backtest_unlock: true,
             no_auto_update: true,
             auto_recover: true,
             alerts: true,
@@ -83,6 +87,10 @@ pub enum Group {
     StudyOnStudy,
     /// 单张图表的绘图数量（DRAWINGS_ON_CHART）客户端 gate 解锁
     Drawings,
+    /// 回测报告的**客户端**判定项解锁：扩展指标、交易记录 CSV/XLSX 导出。
+    /// 高精度历史 K 线 / 每根历史 tick / 深回测由服务端算力决定（实测打开后
+    /// 报告变空 + 升级提示），不放进来。
+    Backtest,
     /// 禁用启动时的自动更新检查
     NoAutoUpdate,
     /// 登录回调直达：每个实例把 `--user-data-dir` 写进 tradingview:// 注册，
@@ -108,6 +116,7 @@ impl Group {
             Group::Charts => f.charts_unlock,
             Group::StudyOnStudy => f.study_on_study,
             Group::Drawings => f.drawings_unlock,
+            Group::Backtest => f.backtest_unlock,
             Group::NoAutoUpdate => f.no_auto_update,
             Group::Auth => true,
             Group::Recover => f.auto_recover,
@@ -328,10 +337,14 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
-                        // 语句边界校验：配平若被正则字面量带偏，这里会落到表达式中间
+                        // 语句边界校验：配平若被正则字面量带偏，这里会落到表达式中间。
+                        // `.` 是合法的：真实代码里 `.on("dom-ready",…)` 后面直接链式
+                        // `.on("did-navigate-in-page",…)`（2026-11-26 实测，段尾下一字节
+                        // 就是 `.`）。早先不认 `.`，老副本升级注入会被判"锚点未命中"，
+                        // 只能整份重建副本才打得进去。
                         let ok = match bytes.get(i + 1) {
                             None => true,
-                            Some(b';' | b',' | b')' | b'\n' | b'\r' | b' ' | b'\t') => true,
+                            Some(b';' | b',' | b')' | b'.' | b'\n' | b'\r' | b' ' | b'\t') => true,
                             _ => false,
                         };
                         return if ok { Some((start, i + 1)) } else { None };
@@ -418,17 +431,13 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
     // 0c) `.on("dom-ready",…)` 回调段按段迁移：v2（注入与 handleDomReady 耦合）与
     //     v3 初版（壳与注入耦合）文本完全不同，靠 old 精确匹配会失配，
     //     还会把已装好的副本判成"锚点未命中"。
-    //     现行形态是「恒开的 Core 壳 + 可开关的注入」：旧副本先统一重置成壳，
-    //     注入由下面的常规循环按开关补——既不会把重试壳跟着开关一起带走，
-    //     也不会在关掉开关后残留旧注入。
-    if let (Some(core), Some(p)) = (
-        PATCHES.iter().find(|p| p.group == Group::Core),
-        PATCHES.iter().find(|p| p.new.contains("__tvxGuard")),
-    ) {
+    //     现行形态只有「恒开的 Core 壳」：页内推广浮层的注入脚本 2026-11-26 已整段下线
+    //     （靠文案/面积猜 DOM 去隐藏，误伤远大于收益），老副本里残留的那段必须收回到壳，
+    //     否则用户升级了 tvhelper，旧脚本还在页面上跑。
+    if let Some(core) = PATCHES.iter().find(|p| p.group == Group::Core) {
         if let Some((s, e)) = promo_segment_range(&src) {
-            let with_guard = core.new.replacen(p.old, p.new, 1);
             let seg = &src[s..e];
-            if seg != core.new && seg != with_guard {
+            if seg != core.new {
                 src.replace_range(s..e, core.new);
             }
         }

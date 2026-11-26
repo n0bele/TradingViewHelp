@@ -70,6 +70,8 @@ pub struct S {
     pub cb_study_hint: &'static str,
     pub cb_drawings: &'static str,
     pub cb_drawings_hint: &'static str,
+    pub cb_backtest: &'static str,
+    pub cb_backtest_hint: &'static str,
     pub cb_recover: &'static str,
     pub cb_recover_hint: &'static str,
     pub cb_noupdate: &'static str,

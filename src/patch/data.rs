@@ -100,6 +100,68 @@ pub const STUDY_ON_STUDY_UNLOCK: &str = "(function(){try{var n=0;(function p(){v
 #[cfg(test)]
 pub const DRAWINGS_UNLOCK: &str = "(function(){try{if(window.__tvxDraw)return;window.__tvxDraw=1;var n=0,NO=function(){return null};function ok(){try{var c=window._exposed_chartWidgetCollection,aw=c&&c.activeChartWidget,w=aw&&typeof aw.value=='function'?aw.value():null,m=w&&typeof w.model=='function'?w.model():null,raw=m&&typeof m.model=='function'?m.model():null;if(!raw)return 0;try{if(typeof raw.drawingsLimit=='function')raw.drawingsLimit=NO}catch(e){}try{var pr=Object.getPrototypeOf(raw);if(pr&&typeof pr.drawingsLimit=='function')pr.drawingsLimit=NO}catch(e){}try{return typeof raw.drawingsLimit=='function'&&null===raw.drawingsLimit()?1:0}catch(e){return 0}}catch(e){return 0}}function p(){if(ok()||n>120)return;n++;setTimeout(p,1e3)}p()}catch(e){}})();";
 
+/// 注入到图表页的回测报告能力解锁脚本（客户端 gate）。
+///
+/// **同一张表，不同 key**：`STUDY_ON_STUDY` 那条改的是套餐配置表里的配额字段，
+/// 这里改的是同一张表（模块 86528，`getProductFeaturesConfig` / `getConfig` / `enabled`
+/// 三个出口）里「有没有这个能力」的 key。free 档没有这个 key，付费档的值是**空对象**
+/// （3.5.1.8500 的 `76108.*.js` 原文：`"BACKTESTING_EXTENDED_METRICS":{}`）。所以这里补的是
+/// **与付费档完全同形的 `{}`**，不是随手一个真值。
+///
+/// **只放一项**：`BACKTESTING_EXTENDED_METRICS`（2026-11-26 真机实测，免费账号
+/// `plan=free` + CDP）。报告里的指标行由 `ReportField.getLockState(enabled)`
+///     决定，锁定时那一格换成锁按钮（`[class*=lockIconButton]`，title
+///     「升级即可完全访问策略报告数据」），数值不出现。报告数据本身照常算出来，只决定画数字
+///     还是画锁 → 纯显示层，可解。
+///     bundle 里声明了 `_lockedMetrics` 的字段共 14 个，**逐个真机验过**：关掉 key 触发一次
+///     重算后，这 14 格全部变成锁按钮（去重后恰为 14 个 lock）；打开 key 再重算，14 格全部
+///     出数值。清单（页签 → 字段）：
+///     明细：手续费成本；期刊：夏普比率、Sortino比率；基准：相关性（与买入持有相关性）；
+///     保证金使用：总清算量；增长与衰退：最大回撤额占初始资本的百分比；
+///     分布：最大盈利、最大亏损；连续：平均连胜纪录、平均连败纪录；
+///     时间形态：最佳入场时间、最佳入场日期、最佳入场月份、平均交易持续时间。
+///     （`bestHourForEntries` 是唯一例外：它在这份数据上 `value` 是 `undefined`——该维度
+///     没样本。这一格一旦按 free 渲染成过锁，之后重算也不会重画（组件的 `value` props
+///     始终是 `undefined`，渲染结果不变），界面上就可能一直停在锁；即使解锁，
+///     渲染分支给的也只是 `—`。其余 13 项在同样条件下稳定出数值。）
+///     **锁定态是在「报告重算」那一刻烘进去的**：只切「明细 ↔ 期刊」不会刷新，
+///     必须改一个输入（佣金/初始资金）触发重算，否则会误判成「删了 key 没效果」。
+///     **冷启动首屏也是锁态**：页面先画出上一次的报告，补 key 之后不会自动重算
+///     （实测冷启动 5 个锁 → 改佣金重算 → 13 项出数值）。
+/// **故意不含**（实测放行后只会让回测变成空结果，比不解锁更糟）：
+///   - `BACKTESTING_EXPORT_CSV` / `BACKTESTING_EXPORT_XLSX`：判定确实在客户端——导出
+///     按钮的点击体是 `enabled(EXPORT_CSV) ? f().then(埋点) : openPaywall(PAYWALL_…)`，
+///     `f()` 用的就是页面上已有的 `reportsData`；运行时 A/B 调 `enabled('BACKTESTING_EXPORT_CSV')`
+///     也确实 true→删→false→补→true。**但 3.5.1.8500 的报告里根本没渲染出这个按钮**
+///     （全文档 0 个 `downloadButton-PgtNiNYX`、0 个挂着 `BACKTESTING_EXPORT` 处理器的元素，
+///     报告有数据时也没有），用户点不到 → 放了等于没放，所以不保留这两个 key。
+///     哪天某个布局真把按钮画出来，再把它们加回 `FE` 即可。
+///   - `BAR_DETALIZATION`（K线精度→高精度，每根K线约 32 tick）：
+///     未放行时该选项**看得见但没有 lock 标记**，点下去无任何反应——因为条目 onClick 是
+///     `e ? runOrGoProWithoutSync(PAYWALL_BAR_DETALIZATION, 回调, ProductFeatures.BAR_DETALIZATION)
+///     : 直接赋值`，拿不到能力就走付费墙分支，而付费墙又被子系统拦截器隐藏了。
+///     运行时把 key 补进 free 后重试：label 从「默认精度」变成「高精度」，报告立刻变
+///     「该策略目前尚未进行任何交易」，底部跳出「升级到Premium方案，即可获得更高的K线细节」。
+///     → 客户端放行只是让选项可选，算不出来的原因是服务端。
+///   - `SCRIPT_EXECUTION_ON_HISTORY_BARS`（脚本执行→在历史K线tick）：
+///     未放行时条目 HTML 一直是 `box-… unchecked`，点了不勾——onClick 是 `m?.(!d)`，
+///     `m` 为空就是空调用。补上 key 后勾选生效，报告同样立刻变空。
+///   - `DEEP_HISTORY_BACKTEST`：深回测走独立 WebSocket（`WEBSOCKET_HOST_FOR_DEEP_BACKTESTING`），
+///     `set_auth_token` 后服务端回 `not_allowed`，客户端只能删会话。
+/// 这三项都由服务端算力/数据决定，客户端改 flag 只会得到「能点、点了没结果」。
+///
+/// 为什么直接取表而不是扫源码特征：`getProductFeaturesConfig(plan)` 在免费档
+/// 返回的就是 `c.free` 这个共享对象本身（`S(e)`：有 `extends` 才拷贝，free 没有），
+/// 所以对返回值赋值等于改表；`getConfig`/`enabled` 每次调用都现读该表，改完立刻生效。
+///
+/// 定位方式分两步，都是只读现有模块、不新造状态：
+///   1. 从 webpack 模块缓存 `rq.c` 里找 exports 带 `getProductFeaturesConfig` 的模块（便宜）；
+///   2. 缓存里没有（模块还没被实例化）就退到源码扫描 + `rq(id)` 实例化，每 5 秒一次。
+///
+/// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
+#[cfg(test)]
+pub const BACKTEST_UNLOCK: &str = "(function(){try{if(window.__tvxBT)return;window.__tvxBT=1;var FE=['BACKTESTING_EXTENDED_METRICS'];var n=0,rq=null;function R(){if(rq)return rq;try{var k=Object.keys(window).filter(function(x){return /webpackChunk/i.test(x)})[0];if(!k)return null;var r=null;window[k].push([[Date.now()%1e6],{},function(q){r=q}]);if(typeof r=='function')rq=r}catch(e){}return rq}function hit(e){try{if(!e||typeof e.getProductFeaturesConfig!='function')return 0;var f=e.getProductFeaturesConfig('free');if(!f||typeof f!='object')return 0;for(var j=0;j<FE.length;j++){if(!f[FE[j]])f[FE[j]]={}}return 1}catch(e){return 0}}function cached(){var r=R();if(!r)return 0;var c=r.c||{},ids=Object.keys(c),i;for(i=0;i<ids.length;i++){var e;try{e=c[ids[i]]&&c[ids[i]].exports}catch(x){continue}if(hit(e))return 1}return 0}function deep(){var r=R();if(!r)return 0;var ids=Object.keys(r.m||{}),i,s;for(i=0;i<ids.length;i++){try{s=String(r.m[ids[i]])}catch(x){continue}if(s.indexOf('getProductFeaturesConfig')<0)continue;var e;try{e=r(ids[i])}catch(x){continue}if(hit(e))return 1}return 0}function tick(){var ok=0;try{ok=cached()||(n>2&&n%5==0&&deep())}catch(e){}if(ok){window.__tvxBT=2;try{console.log('[tvx] backtest features unlocked')}catch(e){}return}if(n>120)return;n++;setTimeout(tick,1e3)}tick()}catch(e){}})();";
+
 /// 注入到图表页的断线自愈脚本（单引号书写：整串要嵌在 `executeJavaScript("…")` 里）。
 /// 逻辑：发现「连接已关闭 / 恢复连接」类弹窗 → 先点「恢复连接 / Reconnect」；
 /// 4 秒后弹窗还在就重载页面（会话与布局都在服务端，重载会重新拉历史数据）；
@@ -118,46 +180,6 @@ pub const DRAWINGS_UNLOCK: &str = "(function(){try{if(window.__tvxDraw)return;wi
 #[cfg(test)]
 pub const DISCONNECT_RECOVER: &str = "(function(){try{if(window.__tvxRecover)return;window.__tvxRecover=1;var K=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|關閉了這個連線|連線已中斷|We closed this connection|Connection closed|Verbindung wurde geschlossen|Verbindung getrennt|соединение закрыто|соединение было закрыто|この接続を閉じました|接続が切断されました|연결이 종료되었습니다|연결이 끊어졌습니다|conexión cerrada|conexión se ha cerrado|connexion fermée|connexion a été fermée|conexão fechada|conexão foi encerrada|bağlantı kapatıldı|bağlantı kesildi|kết nối đã bị đóng|kết nối đã ngắt|การเชื่อมต่อถูกปิด|koneksi ditutup|koneksi terputus|połączenie zostało zamknięte|connessione chiusa|connessione è stata chiusa|تم إغلاق الاتصال/i;var R=/恢复连接|重新连接|恢復連線|重新連線|Restore connection|Reconnect|Verbindung wiederherstellen|Erneut verbinden|Neu verbinden|Восстановить соединение|Переподключиться|接続を復元|再接続|연결 복원|다시 연결|Restaurar conexión|Reconectar|Rétablir la connexion|Reconnecter|Restaurar conexão|Reconectar|Bağlantıyı geri yükle|Yeniden bağlan|Khôi phục kết nối|Kết nối lại|เชื่อมต่อใหม่|กู้คืนการเชื่อมต่อ|Pulihkan koneksi|Hubungkan ulang|Przywróć połączenie|Połącz ponownie|Ripristina connessione|Riconnetti|إعادة الاتصال/i;var waits=[0,15000,60000,300000];function st(){try{return JSON.parse(sessionStorage.getItem('tvxRecover')||'{}')}catch(e){return {}}}function save(o){try{sessionStorage.setItem('tvxRecover',JSON.stringify(o))}catch(e){}}function dlg(){var q=document.querySelectorAll('[role=dialog],[data-name*=dialog],[class*=dialog]');for(var i=0;i<q.length;i++){var e=q[i],t=e.textContent||'';if(t.length<900&&K.test(t))return e}return null}function btn(d){var b=d.querySelectorAll('button,[role=button],a');for(var i=0;i<b.length;i++){var t=(b[i].textContent||'').trim();if(t&&t.length<40&&R.test(t))return b[i]}return null}var ok=0;function tick(){var d=dlg();if(!d){if(++ok>=75){var h=st();if(h.n||h.t)save({n:0,t:0});ok=0}return}ok=0;var s=st();if((s.n||0)>=4)return;d.setAttribute('data-tvx-recovering','1');if(!d.__tvxClicked){var b=btn(d);if(b){try{b.click()}catch(e){}d.__tvxClicked=1}}setTimeout(function(){if(!dlg())return;var o=st(),n=o.n||0;if(n>=4)return;var now=Date.now();if(now-(o.t||0)<(waits[n]||0))return;save({n:n+1,t:now});try{location.reload()}catch(e){}},4000)}setInterval(tick,800)}catch(e){}})();";
 
-/// 注入到图表页的「页内推广浮层拦截器」（v2：插入即拦，不再轮询）。
-///
-/// 背景：充值/升级提示不是壳层弹窗——TradingView 在图表页里自己渲染 React 浮层，
-/// 壳层那四条补丁（nk / showPaywall / requestProFeature / OPEN_NEW_WINDOW 过滤）
-/// 都碰不到它。
-///
-/// **v1 为什么没拦住（实测复盘，勿重犯）**：
-///   1. 识别门槛要求 textContent 里出现 `TradingView`。但「更多指标，更多的交易机会」
-///      这张指标数量弹窗的正文里根本没有这个词——TradingView 只印在宣传图（位图）上，
-///      于是直接被 `!T.test(t)` 判成"不是推广"而跳过。**文案不是可靠指纹。**
-///   2. 找到"长得像关闭"的按钮就只点它、然后 `return`：按钮无效（装饰用 ×、
-///      或点了不销毁浮层）时浮层原样留着，等于什么都没做。
-///   3. 1.2 秒轮询：即使判定正确，也至少已经画出来 1 秒以上，用户看着它闪一下。
-///   4. 只查 `[role=dialog]/[class*=modal]…` 这批选择器：根节点换成别的类名、
-///      落在 shadow root 里、或整卡是个跨域 iframe 时，压根看不见。
-///
-/// **v2 的做法（提早到"插入那一刻"）**：
-///   - `MutationObserver` 监听 document 的 childList+subtree：节点一插进 DOM 就判定，
-///     回调本身是微任务，在浏览器绘制之前执行 → 判定命中时浮层**一帧都不会画出来**。
-///     不再"点关闭"，直接 `display:none !important`（不依赖浮层有没有关闭按钮）。
-///   - 识别不再要求任何语言的标题译文，只看**不翻译的结构与品牌词**，任一条命中即拦：
-///       a) 出现 ≥2 个套餐名（Basic/Essential/Premium/Ultimate/Advanced，各语言都不译）
-///          且带购买/品牌/限制语义 → 截图 1 这类"指标数量"卡就落在这条；
-///       b) 品牌词 + 购买语义 + 大尺寸媒体（video / 大图 / 大 iframe）→ 截图 2 这类推广卡；
-///       c) 购买语义 + 限制语义（limit/上限/最大…）+ 媒体或套餐名。
-///   - 跨域 iframe 兜底：任何覆盖 ≥35% 视口的 iframe 视为浮层（图表页没有这么大的正常 frame）。
-///   - shadow root：新节点带 shadowRoot 时把观察器挂进去，不靠 document 查询。
-///   - 1 秒全量扫描只作最后兜底（应对 React 复用节点、框架内部重排）。
-///
-/// **四道保险，绝不误伤**：
-///   1. 含 `<canvas>` 的子树一律跳过（图表本体）；`body`/`html`/`#root` 永不处理；
-///   2. 文案含「恢复连接/连接已关闭」跳过（交给断线自愈，那里要的是"恢复"不是"藏"）；
-///   3. 每批 DOM 变更最多判 80 个节点，避免图表高频重绘时拖慢页面；
-///   4. 只在"有按钮/链接/媒体"的子树里判定，纯文本节点与图表图元直接跳过。
-///
-/// 注意：这只是"不让它显示"。指标数量是服务端拒绝（study_limit_exceeded），
-/// 客户端没有可解除的 gate——想真正多开指标只能升级方案，这里不改变任何配额。
-/// 常量仅在测试里用于逐字漂移检查（正式文本内嵌在补丁 new 里）。
-#[cfg(test)]
-pub const PROMO_GUARD: &str = "(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();";
 
 /// 上一版（计数只存内存，重载即清零）。已打过的副本要先迁移到当前版本。
 /// handleDomReady 段的开头（补丁 new 与迁移文本都必须以它起头）
@@ -266,24 +288,6 @@ pub const PATCHES: &[Patch] = &[
         new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial|paywall|pro-?plans)/i.test(String(n)))return;const o={url:n};",
     },
     Patch {
-        name: "页内推广浮层插入即拦截",
-        name_en: "Intercept in-page upgrade popups before they paint",
-        group: Group::AdBlock,
-        // 前三条只管壳层（独立窗口 / IPC）。TradingView 把升级提示改成了图表页自己渲染的
-        // React 浮层，壳层补丁看不到它。v1 用"1.2 秒轮询 + 文案匹配 + 点关闭"来兜，
-        // 实战漏了两张（文案里没有 TradingView 的那张指标数量卡、以及点了没用的 ×）：
-        // 判定发生在浮层已经画出来之后，本质上仍是"事后清理"。
-        // v2 改成 MutationObserver：节点插入 DOM 的微任务里就判定并隐藏，命中即不上屏；
-        // 识别只看不翻译的结构与品牌词，不再要求某种语言的标题文案。
-        // v3 的「等视图就绪」由恒开的 Core 补丁提供（见 DOM_READY_SHELL）；本条只往壳的
-        // 空位（SHELL_HOOK）里填注入脚本——这样单独关掉「拦截广告弹窗」不会把重试壳一起关掉。
-        // 原来的写法是 `{this.handleDomReady(),this.isBrowserViewValid()&&executeJavaScript(…)}`，
-        // 首次 dom-ready（视图未就绪）时整段跳过且不重试，实测启动后 48~56 秒零注入。
-        // 现在 DIS 只认真正的断线句（关闭了这个连接 / 连接已关闭 / We closed this connection…）。
-        old: SHELL_HOOK,
-        new: "t.handleDomReady(),void t.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}))",
-    },
-    Patch {
         name: "广告/追踪域名网络拦截",
         name_en: "Ad/tracker domain blocking",
         group: Group::AdBlock,
@@ -324,6 +328,20 @@ pub const PATCHES: &[Patch] = &[
         // 注入脚本把图表模型的 drawingsLimit() 打空（null 是执法函数的直接放行条件）。
         old: "this.allowTitleUpdate(),Ge().allowAlertNotificationsSoundOnce()",
         new: "this.allowTitleUpdate(),this.executeJavaScript(\"(function(){try{if(window.__tvxDraw)return;window.__tvxDraw=1;var n=0,NO=function(){return null};function ok(){try{var c=window._exposed_chartWidgetCollection,aw=c&&c.activeChartWidget,w=aw&&typeof aw.value=='function'?aw.value():null,m=w&&typeof w.model=='function'?w.model():null,raw=m&&typeof m.model=='function'?m.model():null;if(!raw)return 0;try{if(typeof raw.drawingsLimit=='function')raw.drawingsLimit=NO}catch(e){}try{var pr=Object.getPrototypeOf(raw);if(pr&&typeof pr.drawingsLimit=='function')pr.drawingsLimit=NO}catch(e){}try{return typeof raw.drawingsLimit=='function'&&null===raw.drawingsLimit()?1:0}catch(e){return 0}}catch(e){return 0}}function p(){if(ok()||n>120)return;n++;setTimeout(p,1e3)}p()}catch(e){}})();\").catch((()=>{})),Ge().allowAlertNotificationsSoundOnce()",
+    },
+    Patch {
+        name: "回测扩展指标解锁（客户端 gate）",
+        name_en: "Backtest extended metrics unlock (client gate)",
+        group: Group::Backtest,
+        // 锚点取 handleDomReadyForNonLocalFiles 里 `setupHeapLog()` 之后那句 push：
+        // 与本链上其余三条（指标叠加用的函数首语句、多图表用的 insertCSS 段、
+        // 绘图用的 allowTitleUpdate 尾巴）互不重叠，任一开关关闭都不影响其余命中。
+        // 插入的脚本改的是套餐配置表的共享对象（free 档返回的就是表本身），
+        // 只补 `BACKTESTING_EXTENDED_METRICS` 这一个 key——导出判定虽在客户端但没有
+        // 界面入口，K线精度/历史tick/深回测由服务端算力决定（实测打开只得到空报告 +
+        // 升级提示），详见 BACKTEST_UNLOCK 的注释。
+        old: "this.setupHeapLog(),this.jsExecutionTimeouts.push(n,o),",
+        new: "this.setupHeapLog(),this.executeJavaScript(\"(function(){try{if(window.__tvxBT)return;window.__tvxBT=1;var FE=['BACKTESTING_EXTENDED_METRICS'];var n=0,rq=null;function R(){if(rq)return rq;try{var k=Object.keys(window).filter(function(x){return /webpackChunk/i.test(x)})[0];if(!k)return null;var r=null;window[k].push([[Date.now()%1e6],{},function(q){r=q}]);if(typeof r=='function')rq=r}catch(e){}return rq}function hit(e){try{if(!e||typeof e.getProductFeaturesConfig!='function')return 0;var f=e.getProductFeaturesConfig('free');if(!f||typeof f!='object')return 0;for(var j=0;j<FE.length;j++){if(!f[FE[j]])f[FE[j]]={}}return 1}catch(e){return 0}}function cached(){var r=R();if(!r)return 0;var c=r.c||{},ids=Object.keys(c),i;for(i=0;i<ids.length;i++){var e;try{e=c[ids[i]]&&c[ids[i]].exports}catch(x){continue}if(hit(e))return 1}return 0}function deep(){var r=R();if(!r)return 0;var ids=Object.keys(r.m||{}),i,s;for(i=0;i<ids.length;i++){try{s=String(r.m[ids[i]])}catch(x){continue}if(s.indexOf('getProductFeaturesConfig')<0)continue;var e;try{e=r(ids[i])}catch(x){continue}if(hit(e))return 1}return 0}function tick(){var ok=0;try{ok=cached()||(n>2&&n%5==0&&deep())}catch(e){}if(ok){window.__tvxBT=2;try{console.log('[tvx] backtest features unlocked')}catch(e){}return}if(n>120)return;n++;setTimeout(tick,1e3)}tick()}catch(e){}})();\").catch((()=>{})),this.jsExecutionTimeouts.push(n,o),",
     },
     Patch {
         name: "登录回调直达发起实例",

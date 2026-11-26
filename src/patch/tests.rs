@@ -5,6 +5,17 @@
 
 use super::*;
 
+/// 2026-11-26 下线的「页内推广浮层」注入段的历史形态，只用于迁移回归：
+/// 它曾被填进 Core 壳的空位，形态是「handleDomReady + executeJavaScript(脚本) + catch」。
+/// 现在这一段必须能被整段认出来并收回到壳，否则老副本升级后旧脚本还在页面上跑。
+const LEGACY_PROMO_SEG: &str = "t.handleDomReady(),void t.executeJavaScript(\"(function(){window.__tvxPromo=1})();\").catch((()=>{}))";
+
+/// 原样 index.js：把每条补丁的 `old` 依序拼起来。apply() 按组应用组内全部补丁，
+/// 所以每个 old 都必须恰好出现一次。
+fn pristine_source() -> String {
+    PATCHES.iter().map(|p| p.old).collect::<Vec<_>>().join("\n")
+}
+
 #[test]
 fn patches_are_self_consistent() {
     for p in PATCHES {
@@ -108,37 +119,12 @@ fn disconnect_recovery_injection_matches_const() {
     assert!(DISCONNECT_RECOVER.contains("We closed this connection"));
 }
 
+/// Core 壳的形状与重入判定：壳恒开、留出注入空位、靠代次令牌去重。
+///
+/// 2026-11-26 起页内推广浮层的注入脚本整段下线（靠文案/面积猜 DOM 去隐藏，
+/// 误伤远大于收益），这里只钉壳本身，不再钉注入文本。
 #[test]
-fn promo_guard_injection_matches_const() {
-    // 页内推广浮层脚本必须与常量逐字一致（常量只用于漂移检查），
-    // 同样不得出现双引号：整串嵌在 executeJavaScript("…") 里。
-    let p = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .expect("页内推广浮层补丁应在补丁集里");
-    assert!(p.new.contains(PROMO_GUARD));
-    assert!(!PROMO_GUARD.contains('"'));
-    // v2 的核心：插入即判定（微任务里隐藏），不再等轮询
-    assert!(PROMO_GUARD.contains("new MutationObserver"));
-    assert!(PROMO_GUARD.contains("subtree:!0"));
-    assert!(!PROMO_GUARD.contains(".click("), "v2 不再点按钮：点了没用的 × 是 v1 的漏点");
-    // 识别不依赖任何一种语言的标题，也不依赖 TradingView 这个词
-    assert!(PROMO_GUARD.contains("var TIER=/basic|essential|premium|ultimate|advanced/gi"));
-    assert!(PROMO_GUARD.contains("if(k>=2&&(buy||br||lim))return 1"));
-    // 摘节点时必须避开含 canvas 的容器（图表本体）
-    assert!(PROMO_GUARD.contains("querySelector('canvas')"));
-    assert!(PROMO_GUARD.contains("if(hasChart(e))return"));
-    // 断线提示交给自愈，不能被当推广藏掉
-    assert!(PROMO_GUARD.contains("恢复连接"));
-    assert!(PROMO_GUARD.contains("if(DIS.test(t))return 0"));
-    // 但 DIS 不能再认「获取更多连接」——那是连接数付费墙的标题（实测放过）
-    assert!(!PROMO_GUARD.contains("获取更多连接"));
-    assert!(!PROMO_GUARD.contains("Get more connections"));
-    // v3：注入只填空位；「等 BrowserView 就绪」由恒开的 Core 补丁提供。
-    // 两者绑在一起会让「关掉拦截广告弹窗」顺带关掉启动期重试（审计发现的耦合）。
-    assert_eq!(p.old, SHELL_HOOK, "推广补丁只能填空位，不能自带壳");
-    assert!(p.new.starts_with("t.handleDomReady(),void t.executeJavaScript(\""));
-    assert!(p.new.ends_with("\").catch((()=>{}))"));
+fn core_shell_shape() {
     let core = PATCHES
         .iter()
         .find(|q| q.group == Group::Core)
@@ -159,11 +145,33 @@ fn promo_guard_injection_matches_const() {
         charts_unlock: false,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
     };
     assert!(Group::Core.enabled(&all_off), "Core 必须恒开");
+}
+
+/// 拦截只允许发生在「壳层补丁 + 网络层 + 能力表」，不允许再有
+/// 「按文案/面积隐藏已渲染 DOM」的注入——那正是误伤用户手动打开界面的根源。
+#[test]
+fn no_dom_hiding_injection_remains() {
+    for p in PATCHES {
+        let body = format!("{}{}", p.old, p.new);
+        for banned in [
+            "display','none'",
+            "MutationObserver",
+            "data-tvx-hidden",
+            "__tvxGuard",
+        ] {
+            assert!(
+                !body.contains(banned),
+                "补丁「{}」里仍有 DOM 隐藏逻辑（{banned}）",
+                p.name
+            );
+        }
+    }
 }
 
 /// 历史注入文本（只隐藏版 / 只存内存计数的 v1 / 上一版开窗过滤）：apply() 必须能就地
@@ -265,22 +273,15 @@ fn stale_promo_segment_is_migrated_whole() {
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("index.js");
 
-    let p = PATCHES
-        .iter()
-        .find(|q| q.new.contains("__tvxGuard"))
-        .expect("页内推广浮层补丁应在补丁集里");
-    // 模拟 v3 初版：壳 + 旧脚本（脚本标记换成 __tvxPromo）耦合在同一个回调里
-    let stale_guard = p.new.replace("window.__tvxGuard=1", "window.__tvxPromo=1");
-    let stale = DOM_READY_SHELL.replacen(SHELL_HOOK, &stale_guard, 1);
+    // 模拟 v3 初版：壳 + 旧注入段耦合在同一个回调里
+    let stale = DOM_READY_SHELL.replacen(SHELL_HOOK, LEGACY_PROMO_SEG, 1);
     assert_ne!(stale, DOM_READY_SHELL, "模拟的历史段不能与当前壳相同");
 
-    // 旧副本的形态：Core 的位置放耦合段，推广补丁的小段不存在
+    // 旧副本的形态：Core 的位置放耦合段
     let src: String = PATCHES
         .iter()
         .map(|q| {
-            if q.name == p.name {
-                ""
-            } else if q.group == Group::Core {
+            if q.group == Group::Core {
                 stale.as_str()
             } else {
                 q.new
@@ -294,7 +295,7 @@ fn stale_promo_segment_is_migrated_whole() {
     assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
     let after = fs::read_to_string(&f).unwrap();
     assert!(!after.contains("__tvxPromo"), "旧脚本应被整段换掉");
-    assert!(after.contains("__tvxGuard"), "应迁移成当前注入");
+    assert!(after.contains(SHELL_HOOK), "注入段应收回到壳的空位");
     // 注入打上后壳里的空位被填掉，整段文本不再是 DOM_READY_SHELL，认壳特征
     assert!(core_shell_present(&after), "壳必须存在");
     assert_eq!(
@@ -323,6 +324,36 @@ fn stale_promo_segment_is_migrated_whole() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// 真实 index.js 里 `.on("dom-ready",…)` 后面直接链式挂 `.on("did-navigate-in-page",…)`，
+/// 段尾下一个字节是 `.` 而不是换行。边界校验不认 `.` 时整段迁移被拒，老副本升级注入
+/// 会一直报"锚点未命中"，只能整份重建副本（2026-11-26 在真机副本上撞到）。
+#[test]
+fn promo_segment_tail_followed_by_chained_on_is_migrated() {
+    let dir = std::env::temp_dir().join("tvx-patch-promo-chained-test");
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("index.js");
+
+    let stale = DOM_READY_SHELL.replacen(SHELL_HOOK, LEGACY_PROMO_SEG, 1);
+    // 关键：段尾不换行，直接接下一个链式 `.on(…)`
+    let mut src = format!("{}.on(\"did-navigate-in-page\",(()=>{{}}))", stale);
+    for q in PATCHES {
+        if q.group != Group::Core {
+            src.push('\n');
+            src.push_str(q.new);
+        }
+    }
+    fs::write(&f, &src).unwrap();
+
+    let report = apply(&f, &Flags::default()).unwrap();
+    assert!(report.failed.is_empty(), "链式段尾也应能迁移：{:?}", report.failed);
+    let after = fs::read_to_string(&f).unwrap();
+    assert!(!after.contains("__tvxPromo"), "旧脚本应被整段换掉");
+    assert!(after.contains(SHELL_HOOK), "注入段应收回到壳的空位");
+    assert!(after.contains(".on(\"did-navigate-in-page\""), "链式尾巴不能被切掉");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// 审计回归：关掉「拦截广告弹窗」（合并后的单一开关）不能把 dom-ready 重试壳一起关掉。
 ///
 /// v0.1.6 初版把轮询壳写在「页内推广浮层」这条补丁里（当时的充值屏蔽组），
@@ -336,18 +367,7 @@ fn adblock_off_keeps_dom_ready_shell() {
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("index.js");
 
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
-    let pristine: String = PATCHES
-        .iter()
-        .filter(|p| p.name != promo_name)
-        .map(|p| p.old)
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&f, &pristine).unwrap();
+    fs::write(&f, pristine_source()).unwrap();
 
     let off = Flags {
         adblock: false,
@@ -358,17 +378,19 @@ fn adblock_off_keeps_dom_ready_shell() {
 
     assert!(core_shell_present(&after), "关掉推广后重试壳必须还在");
     assert!(after.contains(SHELL_HOOK), "壳里应留空位");
-    assert!(!after.contains("__tvxGuard"), "推广脚本不应被注入");
+    // 页内推广注入 2026-11-26 已下线：任何开关下都不应再有它
+    assert!(!after.contains("__tvxPromo"), "不应残留推广注入");
     // 其余注入照常（它们都排在壳后面，靠壳等视图就绪）
     for mark in ["__tvxRecover", "__tvxDraw", "_exposed_chartWidgetCollection"] {
         assert!(after.contains(mark), "关掉推广不应影响 {mark} 注入");
     }
     assert!(is_patched(&f, &off), "is_patched 应认为当前状态正确");
 
-    // 再打开：注入补上，壳仍只有一处
+    // 再打开：壳仍只有一处，且不会冒出注入脚本
     apply(&f, &Flags::default()).unwrap();
     let back = fs::read_to_string(&f).unwrap();
-    assert!(back.contains("__tvxGuard"));
+    assert!(!back.contains("__tvxPromo"));
+    assert!(back.contains(SHELL_HOOK), "空位必须一直保留");
     assert_eq!(back.matches("t.__tvxDR=(t.__tvxDR||0)+1").count(), 1);
 
     let _ = fs::remove_dir_all(&dir);
@@ -433,29 +455,18 @@ fn v2_promo_segment_is_migrated_to_shell() {
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("index.js");
 
-    let p = PATCHES
-        .iter()
-        .find(|q| q.new.contains("__tvxGuard"))
-        .expect("页内推广浮层补丁应在补丁集里");
-    let guard = p
-        .new
-        .strip_prefix("t.handleDomReady(),void t.executeJavaScript(\"")
-        .and_then(|r| r.strip_suffix("\").catch((()=>{}))"))
-        .expect("当前补丁文本必须符合「空位 + 脚本 + 收尾」的结构");
     // 显式拼接，避免 format! 的 `}}` 转义把收尾括号算错一位
     let mut v2 = String::new();
     v2.push_str(PROMO_SEG_HEAD_V2);
-    v2.push_str(guard);
+    v2.push_str(LEGACY_PROMO_SEG);
     v2.push_str(PROMO_SEG_END_MARK);
     v2.push_str("}))");
 
-    // 旧副本形态：Core 的位置放 v2 段，推广补丁的小段不存在
+    // 旧副本形态：Core 的位置放 v2 段
     let src: String = PATCHES
         .iter()
         .map(|q| {
-            if q.name == p.name {
-                ""
-            } else if q.group == Group::Core {
+            if q.group == Group::Core {
                 v2.as_str()
             } else {
                 q.new
@@ -470,7 +481,8 @@ fn v2_promo_segment_is_migrated_to_shell() {
     let after = fs::read_to_string(&f).unwrap();
     assert!(!after.contains(PROMO_SEG_HEAD_V2), "v2 段首应被换掉");
     assert!(core_shell_present(&after), "应迁移成壳（带就绪重试）");
-    assert!(after.contains("__tvxGuard"), "注入应按开关补上");
+    assert!(!after.contains("__tvxPromo"), "旧注入段必须被丢掉");
+    assert!(after.contains(SHELL_HOOK), "壳里应留空位");
     assert_eq!(after.matches("browser view not ready, retrying").count(), 1);
     assert!(is_patched(&f, &Flags::default()));
 
@@ -528,18 +540,7 @@ fn apply_respects_flags_and_is_reversible() {
     // pristine = 全部补丁 old 依序拼接（apply 按组应用组内全部补丁，
     // 所以每个 old 都必须恰好出现一次；old 之间互不包含已由
     // patches_are_self_consistent 覆盖）
-    // 推广补丁的 old/new 只是壳内的一小段（空位 ↔ 注入），不是独立语句：
-    // 它在文件里的形态由 Core 的 old（原始调用）或 new（壳）决定，拼接时跳过。
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
-    let pristine: String = PATCHES
-        .iter()
-        .filter(|p| p.name != promo_name)
-        .map(|p| p.old)
-        .collect();
+    let pristine: String = pristine_source();
 
     // 各功能组各取代表补丁，便于后半段断言
     let adblock: Vec<&Patch> = PATCHES
@@ -585,6 +586,7 @@ fn apply_respects_flags_and_is_reversible() {
         charts_unlock: false,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
@@ -592,7 +594,6 @@ fn apply_respects_flags_and_is_reversible() {
     // 只有 Auth 组生效时的目标文本
     let keep_auth: String = PATCHES
         .iter()
-        .filter(|p| p.name != promo_name)
         .map(|p| {
             if p.group == Group::Auth || p.group == Group::Core {
                 p.new
@@ -600,7 +601,8 @@ fn apply_respects_flags_and_is_reversible() {
                 p.old
             }
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .join("\n");
     write_pristine(&read()); // 当前是已打状态，先按现状
     let report = apply(&f, &all_off).unwrap();
     assert!(report.items.iter().all(|(_, st)| matches!(
@@ -623,6 +625,7 @@ fn apply_respects_flags_and_is_reversible() {
         charts_unlock: true,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
@@ -793,19 +796,7 @@ fn apply_degrades_per_patch_and_survives_renames() {
     let idx = dir.join("index.js");
 
     // 用所有补丁的 old 拼出一份"原始" index.js。
-    // 推广补丁的 old 只是壳内空位、不是独立语句，跳过（由 Core 的 old 提供落点）。
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
-    let pristine: String = PATCHES
-        .iter()
-        .filter(|p| p.name != promo_name)
-        .map(|p| p.old)
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&idx, &pristine).unwrap();
+    fs::write(&idx, pristine_source()).unwrap();
 
     let on = Flags::default();
     let first = apply(&idx, &on).unwrap();
@@ -825,6 +816,7 @@ fn apply_degrades_per_patch_and_survives_renames() {
         charts_unlock: false,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
@@ -833,6 +825,7 @@ fn apply_degrades_per_patch_and_survives_renames() {
     assert!(third.failed.is_empty(), "撤回不应失败：{:?}", third.failed);
 
     // 模拟上游重打包：压缩标识符全改名，字面锚点失配，通配锚点应接住
+    let pristine = pristine_source();
     let drifted = pristine
         .replace("vL(e,t)", "xQ(e,t)")
         .replace("(0,Le.Qh)()", "(0,Zz.Yy)()")
@@ -871,18 +864,7 @@ fn failing_patches_names_what_did_not_apply() {
     fs::create_dir_all(&dir).unwrap();
     let idx = dir.join("index.js");
 
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
-    let pristine: String = PATCHES
-        .iter()
-        .filter(|p| p.name != promo_name)
-        .map(|p| p.old)
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&idx, &pristine).unwrap();
+    fs::write(&idx, pristine_source()).unwrap();
 
     let on = Flags::default();
     let before = failing_patches(&idx, &on);
@@ -910,6 +892,84 @@ fn failing_patches_names_what_did_not_apply() {
     };
     let _ = apply(&idx, &off).unwrap();
     assert!(failing_patches(&idx, &off).is_empty(), "关掉开关后不该误报");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 回测增强：注入串与补丁字面文本逐字一致；补的是**付费档同形的空对象**，
+/// 且不含 `DEEP_HISTORY_BACKTEST`——深回测走独立 WebSocket、由服务端签发数据，
+/// 客户端把 flag 打开只会得到「按钮能点、点了报错」，比不解锁更糟（实测见补丁注释）。
+#[test]
+fn backtest_injection_matches_const() {
+    let p = PATCHES
+        .iter()
+        .find(|q| q.group == Group::Backtest)
+        .expect("回测增强补丁应在补丁集里");
+    assert!(p.new.contains(BACKTEST_UNLOCK));
+    assert!(!BACKTEST_UNLOCK.contains('"'), "整串嵌在 executeJavaScript(\"…\") 里");
+    // 只有 `BACKTESTING_EXTENDED_METRICS` 真正对用户可见（14 个报告字段从锁变成数值）；
+    // 导出那两个 key 判定能翻但界面没按钮，2026-11-26 起不再补。
+    assert!(BACKTEST_UNLOCK.contains("BACKTESTING_EXTENDED_METRICS"));
+    for k in [
+        "BACKTESTING_EXPORT_CSV",
+        "BACKTESTING_EXPORT_XLSX",
+        "BAR_DETALIZATION",
+        "SCRIPT_EXECUTION_ON_HISTORY_BARS",
+        "DEEP_HISTORY_BACKTEST",
+    ] {
+        assert!(
+            !BACKTEST_UNLOCK.contains(k),
+            "{k} 没有用户可见效果或由服务端强制，不能由客户端打开"
+        );
+    }
+    // 值必须是空对象：这是付费档在套餐表里的原样，不是"随手一个真值"
+    assert!(BACKTEST_UNLOCK.contains("if(!f[FE[j]])f[FE[j]]={}"));
+    // free 档没有 extends，getProductFeaturesConfig 返回的就是表本身
+    assert!(BACKTEST_UNLOCK.contains("getProductFeaturesConfig('free')"));
+    // 锚点不得与其他补丁重复（重复会让先打上的那条吃掉另一条的锚点）
+    for other in PATCHES.iter().filter(|q| q.name != p.name) {
+        assert_ne!(other.old, p.old, "回测增强锚点与 {} 重复", other.name);
+    }
+}
+
+/// 开关可逆：打上后同链上的其余注入都还在，关掉后回到精确原文、不残留。
+#[test]
+fn backtest_patch_applies_and_reverts() {
+    let dir = std::env::temp_dir().join("tvx-patch-backtest-test");
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("index.js");
+    // 合成"未打补丁"的 index.js：取每条补丁的 old。
+    // 推广浮层那条的锚点是 Core 壳里的空位（SHELL_HOOK），原文里本来没有，
+    // 它由 Core 打上后才出现——不能一起拼进来，否则会变成两处。
+    let src: String = PATCHES
+        .iter()
+        .filter(|q| q.old != SHELL_HOOK)
+        .map(|q| q.old)
+        .collect();
+    assert_eq!(src.matches("this.setupHeapLog(),").count(), 1);
+    fs::write(&f, &src).unwrap();
+
+    let on = Flags::default();
+    let report = apply(&f, &on).unwrap();
+    assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
+    assert!(is_patched(&f, &on));
+    let after = fs::read_to_string(&f).unwrap();
+    // 脚本只落一份：__tvxBT 恰好三处（守卫、置 1、置 2）
+    assert_eq!(after.matches("__tvxBT").count(), 3, "注入脚本只应有一份");
+    // 同链上其余注入不受影响（页内推广注入已下线，这里换断线自愈当哨兵）
+    for marker in ["__tvxDraw", "__tvxRecover"] {
+        assert!(after.contains(marker), "{marker} 被挤掉了");
+    }
+
+    let off = Flags {
+        backtest_unlock: false,
+        ..Flags::default()
+    };
+    apply(&f, &off).unwrap();
+    assert!(is_patched(&f, &off));
+    let reverted = fs::read_to_string(&f).unwrap();
+    assert!(!reverted.contains("__tvxBT"), "关掉后不应残留注入");
+    assert!(reverted.contains("this.jsExecutionTimeouts.push(n,o),"), "锚点应原样还原");
 
     let _ = fs::remove_dir_all(&dir);
 }
