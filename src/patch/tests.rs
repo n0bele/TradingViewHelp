@@ -1002,7 +1002,7 @@ fn adblock_layers_only_block_what_they_claim() {
     let promo_src = slice_between(promo.new, "if(/", "/i.test(");
     let ads = PATCHES
         .iter()
-        .find(|p| p.name.contains("广告/追踪域名"))
+        .find(|p| p.new.contains("onBeforeRequest"))
         .expect("广告域名补丁不见了");
     let ads_src = slice_between(ads.new, "cancel:/", "/.test(");
 
@@ -1039,8 +1039,12 @@ fn adblock_layers_only_block_what_they_claim() {
 /// 语料：左边是"必须放行"的正常流量，右边是"必须拦住"的付费墙/广告。
 const ADBLOCK_CORPUS_JS: &str = r#"
 const [, , pSrc, aSrc] = process.argv;
-const P = new RegExp(pSrc, 'i');
-const A = new RegExp(aSrc);
+// 用 eval 拼回**字面量**而不是 new RegExp：new RegExp 里 `/` 不需要转义，
+// 于是「把 `/` 写进 /…/ 却没转义」这种致命错误在测试里永远绿（实测踩过：2026-11-27
+// 副本 index.js 出现 SyntaxError: Invalid regular expression flags，客户端起不来，
+// 而这条用例照样通过）。eval 走的是解析器，多一个裸 / 直接抛 SyntaxError。
+const P = eval('/' + pSrc + '/i');
+const A = eval('/' + aSrc + '/');
 
 // 页面请求开窗：真实会出现的正常窗口（分享、社区、帮助、行情页、登录、OAuth 回跳）
 const winPass = [
@@ -1093,7 +1097,10 @@ const netPass = [
   'https://accounts.tradingview.com/accounts/signin/',
   'https://www.google-analytics.com/g/collect',
   'https://fonts.gstatic.com/s/roboto/v30/abc.woff2',
-  'https://www.googletagmanager.com/gtag/js'
+  'https://www.googletagmanager.com/gtag/js',
+  // 同一个域名下的正常接口不能跟着被拦（offers 是按路径精确命中的）
+  'https://cn.tradingview.com/api/v1/symbols_list/colored/?source=web-tvd',
+  'https://cn.tradingview.com/api/v1/study-templates'
 ];
 
 // 广告/追踪网络：命中即取消
@@ -1107,7 +1114,10 @@ const netBlock = [
   'https://widgets.outbrain.com/outbrain.js',
   'https://s.amazon-adsystem.com/iu3?d=forester-id',
   'https://match.adsrvr.org/track/rid',
-  'https://ads.rubiconproject.com/ad/1234'
+  'https://ads.rubiconproject.com/ad/1234',
+  // 网页自己的推广活动数据：实测屏蔽后整屏 Black Friday 推广不再渲染
+  'https://cn.tradingview.com/api/v1/offers/',
+  'https://www.tradingview.com/api/v1/offers/?locale=zh'
 ];
 
 const bad = [];
@@ -1129,4 +1139,30 @@ fn alert_injection_retries_until_engine_is_present() {
     assert!(ALERTS_MAIN_JS.contains("inject present"), "引擎已在页面上时应封口");
     assert!(ALERTS_MAIN_JS.contains("inject give-up"), "放弃重试必须留日志");
     assert!(!ALERTS_MAIN_JS.contains("INJECTED"), "不能回到永久占位的老写法");
+}
+
+
+/// 落盘前的语法门禁本身要能判对：坏正则必须判 Err，好代码必须判 Ok。
+/// 事故背景（2026-11-27）：补丁把 `/` 写进正则字面量却没转义，改完的 index.js
+/// 解析失败 → 客户端一启动就弹 Error 退出，而 `_doctor` 仍报 17/17（它只看字符串在不在）。
+#[test]
+fn syntax_gate_rejects_unparsable_patch_output() {
+    let dir = std::env::temp_dir().join("tvx-syntax-gate");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("index.js");
+
+    let broken = "var re=/(a/b)/.test('x');";
+    assert!(
+        crate::patch::check_js_syntax(&fake, broken).is_err(),
+        "坏正则必须被判为不可解析"
+    );
+
+    let good = "var re=/(a\\/b)/.test('x');";
+    match crate::patch::check_js_syntax(&fake, good) {
+        Ok(_) => {}
+        Err(e) => panic!("正常代码被误判：{e}"),
+    }
+    assert!(!dir.join(".tvx-syntax-check.js").exists(), "语法检查的临时文件没清掉");
+    let _ = fs::remove_dir_all(&dir);
 }

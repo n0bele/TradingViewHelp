@@ -29,8 +29,9 @@ pub static ZH: S = S {
     btn_doctor: "自检",
     features: "功能",
     cb_adblock: "拦截广告弹窗",
-    cb_adblock_hint: "广告域名直接拦掉，订阅遮罩与充值窗口不再打开、页面请求的充值链接不放行。\n\
-                       不隐藏页面已经渲染出来的内容：推广浮层一旦出现就不去动它（按文案猜 DOM 隐藏会误伤你自己打开的界面）",
+    cb_adblock_hint: "广告域名直接拦掉，订阅遮罩与充值窗口不再打开、页面请求的充值链接不放行；\n\
+                       网页的推广活动数据（/api/v1/offers/）也拦掉，整屏的 Black Friday 之类推广拿不到数据就画不出来。\n\
+                       不按文案猜 DOM 去隐藏已经渲染的内容",
     cb_charts: "多图表布局解锁",
     cb_charts_hint: "客户端 gate：free 档上限 1，注入后放行",
     cb_study: "指标叠加解锁",

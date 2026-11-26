@@ -290,14 +290,20 @@ pub const PATCHES: &[Patch] = &[
         new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial|paywall|pro-?plans)/i.test(String(n)))return;const o={url:n};",
     },
     Patch {
-        name: "广告/追踪域名网络拦截",
-        name_en: "Ad/tracker domain blocking",
+        name: "拦截广告域名与推广活动数据",
+        name_en: "Block ad domains and the promo offer feed",
         group: Group::AdBlock,
         // 挂在既有 initSession 的 webRequest 配置处（onBeforeSendHeaders 之后，
-        // will-download 注册之前）。实测当前图表页无广告 DOM，此为预防性网络层拦截，
-        // 命中第三方广告网络（Google Ads 系/Taboola/Outbrain 等常见买量网络）时直接取消。
+        // will-download 注册之前）。两部分：
+        // 1. 第三方广告网络（Google Ads 系/Taboola/Outbrain 等常见买量网络），预防性拦截；
+        // 2. 网页自己的推广活动数据 `/api/v1/offers/`。实测（2026-11-26，已登录档案）：
+        //    这个接口的响应体里带 Black Friday 活动内容，页面据此渲染「在TradingView电脑版
+        //    分析市场」那种没有关闭按钮的整屏推广。用 CDP 屏蔽该 URL 后重新加载，
+        //    页面里的「探索Black Friday优惠」按钮消失，图表照常（canvas 11 个、品种正常），
+        //    说明拦数据就能从源头断掉它，不必去猜页面文案或按面积隐藏 DOM。
+        //    只命中这一个路径，行情/模板等其他 /api/ 请求不受影响。
         old: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.on(\"will-download\",Zu)",
-        new: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.webRequest.onBeforeRequest(((e,r)=>{r({cancel:/(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|googletagservices\\.com|adservice\\.google\\.|taboola\\.com|outbrain\\.com|amazon-adsystem\\.com|adsrvr\\.org|rubiconproject\\.com)/.test(e.url)})})),e.on(\"will-download\",Zu)",
+        new: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.webRequest.onBeforeRequest(((e,r)=>{r({cancel:/(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|googletagservices\\.com|adservice\\.google\\.|tradingview\\.com\\/api\\/v1\\/offers\\/|taboola\\.com|outbrain\\.com|amazon-adsystem\\.com|adsrvr\\.org|rubiconproject\\.com)/.test(e.url)})})),e.on(\"will-download\",Zu)",
     },
     Patch {
         name: "多图表布局解锁注入（客户端 gate）",

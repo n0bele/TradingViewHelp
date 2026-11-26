@@ -509,13 +509,15 @@ function injectInto(wc, force) {
     wc.executeJavaScript(PROBE_JS, true)
       .then((has) => {
         if (has) {
+          if (!OK.has(id)) log('inject present ' + id + ' ' + url);
           OK.add(id);
-          log('inject present ' + id + ' ' + url);
           return null;
         }
         return wc.executeJavaScript(ENGINE, true).then(() => {
+          // 页面加载慢时 executeJavaScript 会排队，两次尝试可能几乎同时落地；
+          // 引擎本身幂等，这里只保证日志不重复刷（实测一次能刷出两条 inject ok）。
+          if (!OK.has(id)) log('inject ok ' + id + ' ' + url);
           OK.add(id);
-          log('inject ok ' + id + ' ' + url);
         });
       })
       .catch((e) => {

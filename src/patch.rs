@@ -23,9 +23,10 @@
 //! 永不建立），`checkForUpdatesAndNotify` 全 bundle 仅定义未调用；
 //! 设置面板的手动检查/下载路径不受影响。
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 mod data;
 
@@ -547,10 +548,45 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
 
     // 成功一条就落一条：单条失配只影响该功能，不再把整批补丁和副本一起拖死。
     // 调用方据 ApplyReport::failed 提示"哪几项没生效、建议重建副本"。
+    //
+    // 落盘前必须能解析。补丁是纯文本替换，改坏一个正则字面量就足以让主进程整个起不来
+    // （实测 2026-11-27：往 `/…/` 里塞了没转义的 `/` → `SyntaxError: Invalid regular
+    // expression flags`，客户端一启动就退出，日志目录里空空如也；而 `_doctor` 仍报
+    // 17/17，因为它只检查字符串在不在，不检查改完还能不能跑）。现在改坏了就拒绝写入，
+    // 副本保持原样，用户至少还能启动。
+    if src.len() > 64 * 1024 {
+        let _checked = check_js_syntax(index_js, &src)?;
+    }
     fs::write(index_js, src.as_bytes())
         .with_context(|| format!("写回 {}", index_js.display()))?;
     report.warnings = warnings;
     Ok(report)
+}
+
+/// 校验一段 JS 文本能否被解析。用 `node --check`：机器上没装 node 就跳过（不能因为缺
+/// 工具就拒绝打补丁），装了就必过。失败时给出 node 报的那一行错误。
+pub fn check_js_syntax(index_js: &Path, src: &str) -> Result<bool> {
+    // 必须落在同目录：跨盘复制 2MB 没必要，而且 temp 目录偶尔会被安全软件拦。
+    let dir = index_js.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(".tvx-syntax-check.js");
+    fs::write(&tmp, src.as_bytes())
+        .with_context(|| format!("写入语法检查临时文件 {}", tmp.display()))?;
+    let out = Command::new("node").arg("--check").arg(&tmp).output();
+    let _ = fs::remove_file(&tmp);
+    let Ok(out) = out else {
+        return Ok(false); // 没装 node：跳过
+    };
+    if out.status.success() {
+        return Ok(true);
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let detail = err
+        .lines()
+        .find(|l| l.contains("Error"))
+        .unwrap_or("语法错误")
+        .trim()
+        .to_string();
+    bail!("补丁改完的 index.js 无法解析，已放弃写入（原文件未动）：{detail}");
 }
 
 /// 图表页报警引擎（设置页 + 条件求值）：作为真实 JS 文件随程序分发，

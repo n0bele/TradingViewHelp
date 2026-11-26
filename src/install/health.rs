@@ -171,6 +171,19 @@ pub fn environment_problems() -> Vec<EnvProblem> {
     out
 }
 
+/// 主进程能不能解析。补丁改坏一个正则字面量就能让客户端起不来，而"补丁 17/17"
+/// 照样是全绿——这个坑实测踩过一次（2026-11-27），必须单列一行。
+fn syntax_line(index_js: &Path) -> String {
+    let Ok(src) = std::fs::read_to_string(index_js) else {
+        return "主进程语法: 读不到 index.js\n".into();
+    };
+    match patch::check_js_syntax(index_js, &src) {
+        Ok(true) => "主进程语法: 通过\n".into(),
+        Ok(false) => "主进程语法: 未装 node，跳过检查\n".into(),
+        Err(e) => format!("主进程语法: 不通过 —— 客户端会起不来\n  {e}\n"),
+    }
+}
+
 /// 一行行拼好的环境报告（`_doctor` 与界面「自检」共用）。
 pub fn doctor_report() -> String {
     let mut s = String::new();
@@ -247,6 +260,7 @@ pub fn doctor_report() -> String {
                     "已生效"
                 }
             ));
+            s.push_str(&syntax_line(&m.index_js()));
             if !failed.is_empty() {
                 s.push_str(&format!("  未生效: {}\n", failed.join("、")));
                 s.push_str(

@@ -31,7 +31,8 @@ pub static EN: S = S {
     features: "Features",
     cb_adblock: "Block ads & billing popups",
     cb_adblock_hint: "Ad domains are cancelled; subscription overlays and billing windows never open, and page-requested billing links are blocked.\n\
-                       Nothing already rendered is hidden — guessing at the DOM by copy text ends up hiding UI you opened yourself",
+                       The web app's promo feed (/api/v1/offers/) is blocked too, so full-screen Black Friday style promos have no data to render.\n\
+                       Nothing already rendered is hidden by guessing at copy text",
     cb_charts: "Multi-chart layouts",
     cb_charts_hint: "Client-side gate: free tier allows 1; the injection lifts it",
     cb_study: "Study-on-study",
