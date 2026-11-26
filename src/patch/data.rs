@@ -198,6 +198,8 @@ pub const DOM_READY_ORIG: &str = ".on(\"dom-ready\",(()=>{this.handleDomReady()}
 /// 轮询壳里留给注入的"空位"：Core 补丁的 new 写成 `…t.handleDomReady(),void 0;…`，
 /// 推广补丁把这一小段替换成 `…,void t.executeJavaScript("…")`。
 /// 空位与填充分开，是为了让「等视图就绪」这件事不再挂在任何功能开关上。
+// 只有测试会引用它：用真实源码做迁移回归时，认定的就是这一小段空位。
+#[allow(dead_code)]
 pub const SHELL_HOOK: &str = "t.handleDomReady(),void 0";
 
 /// `.on("dom-ready",…)` 的轮询壳：等 BrowserView 就绪再调 `handleDomReady()`，

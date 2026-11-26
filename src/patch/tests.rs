@@ -973,3 +973,160 @@ fn backtest_patch_applies_and_reverts() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// 从 `new` 里切出正则原文：补丁把判定写成内联正则，注释写在别处，
+/// 只有取原文跑一遍才能证明"没误拦"是真的，而不是注释里写的。
+fn slice_between(hay: &str, open: &str, close: &str) -> String {
+    let start = hay
+        .find(open)
+        .unwrap_or_else(|| panic!("找不到起始标记 {open}"))
+        + open.len();
+    let len = hay[start..]
+        .find(close)
+        .unwrap_or_else(|| panic!("找不到结束标记 {close}"));
+    hay[start..start + len].to_string()
+}
+
+/// 误拦回归（用户对上一版的判词是"方法不科学、误拦截太多"）。
+///
+/// 现在只剩两条正则判定：页面请求开窗时的 URL 过滤、网络层的请求域名过滤。
+/// 这里把两条正则**原文**从补丁表里取出来，交给同一个 JS 引擎跑真实语料：
+/// 正常业务流量必须全部放行，付费墙/广告必须全部拦下。
+/// 语料改坏、正则改宽，这条用例都会红。
+#[test]
+fn adblock_layers_only_block_what_they_claim() {
+    let promo = PATCHES
+        .iter()
+        .find(|p| p.name.contains("充值/推广链接"))
+        .expect("开窗过滤补丁不见了");
+    let promo_src = slice_between(promo.new, "if(/", "/i.test(");
+    let ads = PATCHES
+        .iter()
+        .find(|p| p.name.contains("广告/追踪域名"))
+        .expect("广告域名补丁不见了");
+    let ads_src = slice_between(ads.new, "cancel:/", "/.test(");
+
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("跳过误拦回归：本机没有 node");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join("tvx-adblock-corpus");
+    fs::create_dir_all(&dir).unwrap();
+    let js = dir.join("corpus.js");
+    fs::write(&js, ADBLOCK_CORPUS_JS).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(&js)
+        .arg(&promo_src)
+        .arg(&ads_src)
+        .output()
+        .expect("node 启动失败");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "误拦/漏拦：\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("ok"), "语料没跑完：{stdout}{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 语料：左边是"必须放行"的正常流量，右边是"必须拦住"的付费墙/广告。
+const ADBLOCK_CORPUS_JS: &str = r#"
+const [, , pSrc, aSrc] = process.argv;
+const P = new RegExp(pSrc, 'i');
+const A = new RegExp(aSrc);
+
+// 页面请求开窗：真实会出现的正常窗口（分享、社区、帮助、行情页、登录、OAuth 回跳）
+const winPass = [
+  'https://cn.tradingview.com/chart/GOLD/',
+  'https://www.tradingview.com/chart/?symbol=NASDAQ%3AAAPL&interval=60',
+  'https://www.tradingview.com/x/AbCdEf12/',
+  'https://www.tradingview.com/u/someuser/',
+  'https://www.tradingview.com/ideas/',
+  'https://www.tradingview.com/scripts/editors-picks/',
+  'https://www.tradingview.com/markets/stocks-usa/market-movers-gainers/',
+  'https://www.tradingview.com/economic-calendar/',
+  'https://www.tradingview.com/news/',
+  'https://www.tradingview.com/brokers/',
+  'https://www.tradingview.com/symbols/NASDAQ-AAPL/',
+  'https://www.tradingview.com/pine-script-docs/',
+  'https://www.tradingview.com/streams/',
+  'https://www.tradingview.com/screener/',
+  'https://www.tradingview.com/widget/',
+  'https://www.tradingview.com/accounts/signin/',
+  'https://www.tradingview.com/support/solutions/43000594236/',
+  'https://www.tradingview.com/terms-of-use/',
+  'https://www.tradingview.com/privacy-policy/',
+  'https://cn.tradingview.com/hotlist/',
+  'https://cn.tradingview.com/chart/AAPL/',
+  'https://www.tradingview.com/desktop/',
+  'file:///C:/Users/x/.tvx/apps/3.5.1.8500/resources/app/app/window/index.html'
+];
+
+// 该拦的：壳里两个付费墙常量 + 常见充值入口
+const winBlock = [
+  'https://www.tradingview.com/desktop/paywall/',
+  'https://www.tradingview.com/desktop/paywall/upgrade/',
+  'https://www.tradingview.com/pro-plans/features/',
+  'https://www.tradingview.com/pricing/',
+  'https://www.tradingview.com/accounts/subscribe/',
+  'https://www.tradingview.com/billing/',
+  'https://www.tradingview.com/promo/black-friday/',
+  'https://www.tradingview.com/go-pro/?source=desktop'
+];
+
+// 正常网络请求：TradingView 自己的域名一个都不能被域名表命中
+const netPass = [
+  'https://data.tradingview.com/symbol',
+  'https://pushstream.tradingview.com/message-pipe-ws/public',
+  'https://news-mediator.tradingview.com/news-flow/v2/news',
+  'https://s3-symbol-logo.tradingview.com/apple.svg',
+  'https://static.tradingview.com/static/bundles/abc.js',
+  'https://widgets.tradingview.com/widget-watchlist/',
+  'https://www.tradingview.com/chart/',
+  'https://accounts.tradingview.com/accounts/signin/',
+  'https://www.google-analytics.com/g/collect',
+  'https://fonts.gstatic.com/s/roboto/v30/abc.woff2',
+  'https://www.googletagmanager.com/gtag/js'
+];
+
+// 广告/追踪网络：命中即取消
+const netBlock = [
+  'https://securepubads.g.doubleclick.net/tag/js/gpt.js',
+  'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
+  'https://www.googleadservices.com/pagead/conversion.js',
+  'https://www.googletagservices.com/tag/js/gpt.js',
+  'https://adservice.google.com/adsid/integrator.js',
+  'https://cdn.taboola.com/libtrc/tradingview/loader.js',
+  'https://widgets.outbrain.com/outbrain.js',
+  'https://s.amazon-adsystem.com/iu3?d=forester-id',
+  'https://match.adsrvr.org/track/rid',
+  'https://ads.rubiconproject.com/ad/1234'
+];
+
+const bad = [];
+winPass.forEach((u) => { if (P.test(u)) bad.push('误拦开窗  ' + u); });
+winBlock.forEach((u) => { if (!P.test(u)) bad.push('漏拦开窗  ' + u); });
+netPass.forEach((u) => { if (A.test(u)) bad.push('误拦请求  ' + u); });
+netBlock.forEach((u) => { if (!A.test(u)) bad.push('漏拦请求  ' + u); });
+if (bad.length) { console.log(bad.join('\n')); process.exit(1); }
+console.log('ok ' + (winPass.length + winBlock.length + netPass.length + netBlock.length) + ' 条语料');
+"#;
+
+
+/// 注入重试的门禁。实测事故（2026-11-26）：注入前永久占位、只在失败时释放，
+/// 于是 executeJavaScript 卡住时所有重试都被 has() 挡回 —— 图表页开着两分钟没有注入，
+/// 日志里连一条失败都没有。现在必须做到：先探页面状态、放弃时留日志、不留永久占位。
+#[test]
+fn alert_injection_retries_until_engine_is_present() {
+    assert!(ALERTS_MAIN_JS.contains("const PROBE_JS"), "注入前应先探页面里的引擎对象");
+    assert!(ALERTS_MAIN_JS.contains("inject present"), "引擎已在页面上时应封口");
+    assert!(ALERTS_MAIN_JS.contains("inject give-up"), "放弃重试必须留日志");
+    assert!(!ALERTS_MAIN_JS.contains("INJECTED"), "不能回到永久占位的老写法");
+}

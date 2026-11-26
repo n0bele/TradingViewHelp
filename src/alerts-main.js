@@ -455,24 +455,79 @@ ipcMain.handle('tvx-alerts:test', async (e, kind) => {
 
 // ------------------------------------------------------------------ 注入
 
-const INJECTED = new Set();
+// 注入状态。早前的写法是「尝试前就永久占位，只有失败才释放」，实测（2026-11-26，全新档案）：
+// 页面导航刚开始时 executeJavaScript 的 Promise 可能一直不 settle —— 占位永不释放，
+// 于是 did-finish-load、每秒兜底扫描全被 has() 挡在门外：图表页开着两分钟，日志里
+// 只有一行 scan，报警按钮始终不出现，也没有任何失败记录。
+// 现在改成「确认跑完才封口（OK），没确认就退避重试」；引擎自己是幂等的
+// （`if (window.__tvxAlerts) return`），多跑一次没有副作用。
+const OK = new Set();
+const LAST_TRY = new Map();
+const TRIES = new Map();
+const GAVE_UP = new Set();
+const PENDING = new Set(); // 同一时刻只允许一次尝试在飞，避免页面稳定后几条排队脚本一起冲进来
+const RETRY_MS = 5000;
+const MAX_TRIES = 60; // 5 分钟还没成就放弃，日志里留一条 give-up
+
+// 成功的判据是"页面上真有引擎对象"，不是"executeJavaScript 的 Promise 回来了"。
+// 实测（2026-11-26）：加载中的图表页会把 executeJavaScript 排进队列，等页面稳定后
+// 才一起回；而匿名档案的注册墙页面干脆永不返回（主进程直接 executeJavaScript('1+1')
+// 也 5 秒超时）。所以每次尝试先问一句"引擎在不在"，在就封口，不在才灌脚本。
+const PROBE_JS = "!!window.__tvxAlerts";
+
+function forget(id) {
+  OK.delete(id);
+  LAST_TRY.delete(id);
+  TRIES.delete(id);
+  GAVE_UP.delete(id);
+  PENDING.delete(id);
+}
 
 function injectInto(wc, force) {
   if (!ENGINE) return;
   try {
     const url = String(wc.getURL() || '');
     if (!/tradingview\.com\/chart/i.test(url)) return;
-    if (!force && INJECTED.has(wc.id)) return;
-    // 先占位再执行：扫描与多个事件可能同时命中同一个 webContents，
-    // 不先占位会把同一份 34KB 脚本并发执行多次（引擎虽防重复，但没必要）。
-    INJECTED.add(wc.id);
-    wc.executeJavaScript(ENGINE, true)
-      .then(() => {
-        log('inject ok ' + wc.id + ' ' + url);
+    if (OK.has(wc.id)) return;
+    if (PENDING.has(wc.id)) return;
+    const now = Date.now();
+    // 合并同一时刻的多路事件（dom-ready / did-navigate / 每秒扫描），但不等于永久封口
+    if (!force && now - (LAST_TRY.get(wc.id) || 0) < RETRY_MS) return;
+    const tries = TRIES.get(wc.id) || 0;
+    if (tries >= MAX_TRIES) {
+      if (!GAVE_UP.has(wc.id)) {
+        GAVE_UP.add(wc.id);
+        log('inject give-up ' + wc.id + ' ' + url + ' 试了 ' + tries + ' 次都没跑成');
+      }
+      return;
+    }
+    TRIES.set(wc.id, tries + 1);
+    LAST_TRY.set(wc.id, now);
+    const id = wc.id;
+    PENDING.add(id);
+    const release = setTimeout(function () { PENDING.delete(id); }, 8000);
+    wc.executeJavaScript(PROBE_JS, true)
+      .then((has) => {
+        if (has) {
+          OK.add(id);
+          log('inject present ' + id + ' ' + url);
+          return null;
+        }
+        return wc.executeJavaScript(ENGINE, true).then(() => {
+          OK.add(id);
+          log('inject ok ' + id + ' ' + url);
+        });
       })
       .catch((e) => {
-        INJECTED.delete(wc.id);
-        log('inject fail ' + wc.id + ' ' + url + ' ' + String((e && e.message) || e));
+        LAST_TRY.delete(id);
+        // 失败会重试，日志只留前三次，避免每 5 秒刷一条
+        if ((TRIES.get(id) || 0) <= 3) {
+          log('inject fail ' + id + ' ' + url + ' ' + String((e && e.message) || e));
+        }
+      })
+      .then(function () {
+        clearTimeout(release);
+        PENDING.delete(id);
       });
   } catch (e) {
     log('inject throw ' + String((e && e.message) || e));
@@ -482,12 +537,15 @@ function injectInto(wc, force) {
 app.on('web-contents-created', (e, wc) => {
   try {
     wc.on('dom-ready', () => injectInto(wc));
-    wc.on('did-finish-load', () => injectInto(wc));
+    // 首次 dom-ready 常常早于页面稳定，那一次未必跑得成，加载完再强制试一次。
+    // 其余事件不加 force：否则 dom-ready / did-navigate / 扫描会同时绕过 5 秒去重，
+    // 页面稳定后几条注入一起冲进来（实测一次刷出 4~6 条 inject ok）。
+    wc.on('did-finish-load', () => injectInto(wc, true));
     wc.on('did-navigate', () => injectInto(wc));
     wc.on('did-navigate-in-page', () => injectInto(wc));
-    // 导航开始后旧页面已经没了，标记作废，等新页 dom-ready 重注入
-    wc.on('did-start-loading', () => INJECTED.delete(wc.id));
-    wc.on('destroyed', () => INJECTED.delete(wc.id));
+    // 导航开始后旧页面已经没了，状态作废，等新页重新注入
+    wc.on('did-start-loading', () => forget(wc.id));
+    wc.on('destroyed', () => forget(wc.id));
   } catch (err) {}
 });
 

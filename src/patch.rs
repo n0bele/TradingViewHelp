@@ -611,7 +611,7 @@ pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<Vec<String>> {
             // 以前这里静默跳过，副本看起来"构建成功"，实际报警全无。
             warnings.push(format!(
                 "preload 路径不存在（{}），报警桥写不进去——报警功能将不可用。\
-                 处理：点「生成 / 更新副本」重建；仍不行说明该版本目录结构不同，请反馈",
+                 处理：「全部停止」后拨一下任意开关重打补丁；仍不行说明该版本目录结构不同，请反馈",
                 preload.display()
             ));
         } else {

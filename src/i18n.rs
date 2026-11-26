@@ -158,7 +158,7 @@ impl Lang {
 
     pub fn log_need_copy(&self) -> String {
         self.pick(
-            "先在上方「生成 / 更新副本」".into(),
+            "还没有副本：在「账号」里点「添加」，会自动生成".into(),
             "Build a copy first (button above)".into(),
         )
     }
