@@ -29,7 +29,7 @@ pub static EN: S = S {
     btn_doctor: "Self-check",
     features: "Features",
     cb_adblock: "Block ads & billing popups",
-    cb_adblock_hint: "Ad domains are cancelled; billing/subscription windows never open and in-chart promos stay hidden",
+    cb_adblock_hint: "Ad domains are cancelled; billing/subscription windows never open; the web app's campaign feed (/api/v1/offers/) is blocked too, so full-screen promos have no data to render. Nothing already rendered is hidden by guessing at copy",
     cb_charts: "Multi-chart layouts",
     cb_charts_hint: "Client-side gate: free tier allows 1; the injection lifts it",
     cb_study: "Study-on-study",

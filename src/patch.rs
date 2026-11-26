@@ -331,7 +331,7 @@ fn promo_segment_range(src: &str) -> Option<(usize, usize)> {
                         // 语句边界校验：配平若被正则字面量带偏，这里会落到表达式中间
                         let ok = match bytes.get(i + 1) {
                             None => true,
-                            Some(b';' | b',' | b')' | b'\n' | b'\r' | b' ' | b'\t') => true,
+                            Some(b';' | b',' | b')' | b'.' | b'\n' | b'\r' | b' ' | b'\t') => true,
                             _ => false,
                         };
                         return if ok { Some((start, i + 1)) } else { None };
@@ -418,17 +418,14 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
     // 0c) `.on("dom-ready",…)` 回调段按段迁移：v2（注入与 handleDomReady 耦合）与
     //     v3 初版（壳与注入耦合）文本完全不同，靠 old 精确匹配会失配，
     //     还会把已装好的副本判成"锚点未命中"。
-    //     现行形态是「恒开的 Core 壳 + 可开关的注入」：旧副本先统一重置成壳，
-    //     注入由下面的常规循环按开关补——既不会把重试壳跟着开关一起带走，
-    //     也不会在关掉开关后残留旧注入。
-    if let (Some(core), Some(p)) = (
-        PATCHES.iter().find(|p| p.group == Group::Core),
-        PATCHES.iter().find(|p| p.new.contains("__tvxGuard")),
-    ) {
+    //     现行形态只有「恒开的 Core 壳」：页内推广浮层的注入脚本已整段下线——它靠
+    //     「文案含几个套餐名 + 面积够大 + 祖先像弹窗」去猜，误伤远大于收益（自己打开的
+    //     说明卡会被藏、文案无关的投放又漏拦）。老副本里残留的那段必须收回到壳，
+    //     否则用户升级了助手，旧脚本还在页面上跑。
+    if let Some(core) = PATCHES.iter().find(|p| p.group == Group::Core) {
         if let Some((s, e)) = promo_segment_range(&src) {
-            let with_guard = core.new.replacen(p.old, p.new, 1);
             let seg = &src[s..e];
-            if seg != core.new && seg != with_guard {
+            if seg != core.new {
                 src.replace_range(s..e, core.new);
             }
         }

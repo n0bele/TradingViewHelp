@@ -108,64 +108,6 @@ fn disconnect_recovery_injection_matches_const() {
     assert!(DISCONNECT_RECOVER.contains("We closed this connection"));
 }
 
-#[test]
-fn promo_guard_injection_matches_const() {
-    // 页内推广浮层脚本必须与常量逐字一致（常量只用于漂移检查），
-    // 同样不得出现双引号：整串嵌在 executeJavaScript("…") 里。
-    let p = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .expect("页内推广浮层补丁应在补丁集里");
-    assert!(p.new.contains(PROMO_GUARD));
-    assert!(!PROMO_GUARD.contains('"'));
-    // v2 的核心：插入即判定（微任务里隐藏），不再等轮询
-    assert!(PROMO_GUARD.contains("new MutationObserver"));
-    assert!(PROMO_GUARD.contains("subtree:!0"));
-    assert!(!PROMO_GUARD.contains(".click("), "v2 不再点按钮：点了没用的 × 是 v1 的漏点");
-    // 识别不依赖任何一种语言的标题，也不依赖 TradingView 这个词
-    assert!(PROMO_GUARD.contains("var TIER=/basic|essential|premium|ultimate|advanced/gi"));
-    assert!(PROMO_GUARD.contains("if(k>=2&&(buy||br||lim))return 1"));
-    // 摘节点时必须避开含 canvas 的容器（图表本体）
-    assert!(PROMO_GUARD.contains("querySelector('canvas')"));
-    assert!(PROMO_GUARD.contains("if(hasChart(e))return"));
-    // 断线提示交给自愈，不能被当推广藏掉
-    assert!(PROMO_GUARD.contains("恢复连接"));
-    assert!(PROMO_GUARD.contains("if(DIS.test(t))return 0"));
-    // 但 DIS 不能再认「获取更多连接」——那是连接数付费墙的标题（实测放过）
-    assert!(!PROMO_GUARD.contains("获取更多连接"));
-    assert!(!PROMO_GUARD.contains("Get more connections"));
-    // v3：注入只填空位；「等 BrowserView 就绪」由恒开的 Core 补丁提供。
-    // 两者绑在一起会让「关掉拦截广告弹窗」顺带关掉启动期重试（审计发现的耦合）。
-    assert_eq!(p.old, SHELL_HOOK, "推广补丁只能填空位，不能自带壳");
-    assert!(p.new.starts_with("t.handleDomReady(),void t.executeJavaScript(\""));
-    assert!(p.new.ends_with("\").catch((()=>{}))"));
-    let core = PATCHES
-        .iter()
-        .find(|q| q.group == Group::Core)
-        .expect("Core 补丁必须在补丁集里");
-    assert_eq!(core.old, DOM_READY_ORIG);
-    assert_eq!(core.new, DOM_READY_SHELL);
-    assert!(core.new.contains(SHELL_HOOK), "壳里必须留出注入空位");
-    assert!(core.new.contains("(function r(){if(g!==t.__tvxDR)return;if(t.isBrowserViewValid())"));
-    assert!(core.new.contains("browser view not ready, retrying"));
-    // 重入判定与 is_patched 认的是这段特征（core_shell_present），
-    // 壳若改了这段文本必须同步改判定，这里把两处钉在一起
-    assert!(core.new.contains("t.__tvxDR=(t.__tvxDR||0)+1"));
-    assert!(core_shell_present(core.new));
-    assert!(!core_shell_present(core.old), "原始锚点里不应有壳特征");
-    // 壳恒开：关掉全部功能开关也不能把重试带走
-    let all_off = Flags {
-        adblock: false,
-        charts_unlock: false,
-        study_on_study: false,
-        drawings_unlock: false,
-        no_auto_update: false,
-        auto_recover: false,
-        alerts: false,
-    };
-    assert!(Group::Core.enabled(&all_off), "Core 必须恒开");
-}
-
 /// 历史注入文本（只隐藏版 / 只存内存计数的 v1 / 上一版开窗过滤）：apply() 必须能就地
 /// 升级成当前文本，而不是报"锚点失配"。这是升级路径的回归测试。
 /// 断线自愈那两条必须是"完整锚点段"——apply() 拿 p.new 整段去替换它。
@@ -255,37 +197,28 @@ fn stale_recover_segment_is_migrated_whole() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-/// v3 初版（壳与注入耦合在同一个 `.on("dom-ready")` 回调里）→ 现状（恒开壳 + 可开关注入）：
-/// 已装好的副本里是"整段耦合"的文本，apply() 必须整段重置成壳再按开关补注入，
-/// 而不是报"锚点失配"——否则用户升级助手后还是要手工删副本。
+/// 老副本里残留的「页内推广浮层」注入必须整段收回壳。
+///
+/// 这段脚本 2026-11-26 下线：它靠「文案含几个套餐名 + 面积够大 + 祖先像弹窗」去猜，
+/// 误伤自己打开的说明卡、又漏掉文案无关的投放。下线后若只删补丁不做迁移，已经装过
+/// 旧版的用户，页面上还会继续跑这段脚本——所以 apply() 的 0c 段要把它收回空位。
 #[test]
-fn stale_promo_segment_is_migrated_whole() {
+fn stale_promo_segment_is_retracted_to_shell() {
     let dir = std::env::temp_dir().join("tvx-patch-stale-promo-test");
+    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("index.js");
 
-    let p = PATCHES
-        .iter()
-        .find(|q| q.new.contains("__tvxGuard"))
-        .expect("页内推广浮层补丁应在补丁集里");
-    // 模拟 v3 初版：壳 + 旧脚本（脚本标记换成 __tvxPromo）耦合在同一个回调里
-    let stale_guard = p.new.replace("window.__tvxGuard=1", "window.__tvxPromo=1");
+    // 旧副本形态：壳的空位里塞着已下线的那段脚本
+    let stale_guard = format!(
+        "t.handleDomReady(),void t.executeJavaScript(\"{PROMO_GUARD}\").catch((()=>{{}}))"
+    );
     let stale = DOM_READY_SHELL.replacen(SHELL_HOOK, &stale_guard, 1);
     assert_ne!(stale, DOM_READY_SHELL, "模拟的历史段不能与当前壳相同");
 
-    // 旧副本的形态：Core 的位置放耦合段，推广补丁的小段不存在
     let src: String = PATCHES
         .iter()
-        .map(|q| {
-            if q.name == p.name {
-                ""
-            } else if q.group == Group::Core {
-                stale.as_str()
-            } else {
-                q.new
-            }
-        })
+        .map(|q| if q.group == Group::Core { stale.as_str() } else { q.new })
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(&f, &src).unwrap();
@@ -293,31 +226,25 @@ fn stale_promo_segment_is_migrated_whole() {
     let report = apply(&f, &Flags::default()).unwrap();
     assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
     let after = fs::read_to_string(&f).unwrap();
-    assert!(!after.contains("__tvxPromo"), "旧脚本应被整段换掉");
-    assert!(after.contains("__tvxGuard"), "应迁移成当前注入");
-    // 注入打上后壳里的空位被填掉，整段文本不再是 DOM_READY_SHELL，认壳特征
+    assert!(!after.contains("__tvxGuard"), "已下线的隐藏脚本必须被收回");
+    assert!(!after.contains("data-tvx-hidden"), "隐藏标记不能再出现在页面脚本里");
+    assert!(!after.contains("MutationObserver"), "不再按 DOM 变化猜推广");
+    assert!(after.contains(SHELL_HOOK), "空位必须回填");
     assert!(core_shell_present(&after), "壳必须存在");
     assert_eq!(
         after.matches("t.__tvxDR=(t.__tvxDR||0)+1").count(),
         1,
         "壳必须只有一处"
     );
-    // 尾巴标记 `"` + `.catch` 在别的注入补丁里也有（多图表/指标/绘图/断线），
-    // 这里只认壳独有的重试语句，确保没有被复制成两份。
-    assert_eq!(after.matches("browser view not ready, retrying").count(), 1, "重试日志必须只有一处");
+    assert_eq!(after.matches("browser view not ready, retrying").count(), 1);
     assert!(is_patched(&f, &Flags::default()));
 
-    // 关掉「拦截广告弹窗」：注入回退成空位，但**壳必须留着**——
-    // 否则断线自愈/绘图等注入会跟着退回"启动后几十秒空窗"的老毛病（审计发现的耦合）。
-    let off = Flags {
-        adblock: false,
-        ..Flags::default()
-    };
+    // 关掉「拦截广告弹窗」：壳照旧保留（断线自愈/绘图都靠它等视图就绪）
+    let off = Flags { adblock: false, ..Flags::default() };
     apply(&f, &off).unwrap();
     let after = fs::read_to_string(&f).unwrap();
-    assert!(!after.contains("__tvxGuard"), "关掉后不应留注入");
-    assert!(after.contains(DOM_READY_SHELL), "关掉推广后重试壳必须保留");
-    assert!(after.contains(SHELL_HOOK), "空位必须回填");
+    assert!(after.contains(DOM_READY_SHELL), "关掉广告拦截后重试壳必须保留");
+    assert!(after.contains(SHELL_HOOK), "空位必须还在");
     assert!(is_patched(&f, &off));
 
     let _ = fs::remove_dir_all(&dir);
@@ -336,14 +263,8 @@ fn adblock_off_keeps_dom_ready_shell() {
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("index.js");
 
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
     let pristine: String = PATCHES
         .iter()
-        .filter(|p| p.name != promo_name)
         .map(|p| p.old)
         .collect::<Vec<_>>()
         .join("\n");
@@ -356,19 +277,18 @@ fn adblock_off_keeps_dom_ready_shell() {
     apply(&f, &off).unwrap();
     let after = fs::read_to_string(&f).unwrap();
 
-    assert!(core_shell_present(&after), "关掉推广后重试壳必须还在");
+    assert!(core_shell_present(&after), "关掉广告拦截后重试壳必须还在");
     assert!(after.contains(SHELL_HOOK), "壳里应留空位");
-    assert!(!after.contains("__tvxGuard"), "推广脚本不应被注入");
     // 其余注入照常（它们都排在壳后面，靠壳等视图就绪）
     for mark in ["__tvxRecover", "__tvxDraw", "_exposed_chartWidgetCollection"] {
         assert!(after.contains(mark), "关掉推广不应影响 {mark} 注入");
     }
     assert!(is_patched(&f, &off), "is_patched 应认为当前状态正确");
 
-    // 再打开：注入补上，壳仍只有一处
+    // 再打开：壳仍只有一处，且不会把已下线的隐藏脚本补回来
     apply(&f, &Flags::default()).unwrap();
     let back = fs::read_to_string(&f).unwrap();
-    assert!(back.contains("__tvxGuard"));
+    assert!(!back.contains("__tvxGuard"), "已下线的脚本不允许被补回来");
     assert_eq!(back.matches("t.__tvxDR=(t.__tvxDR||0)+1").count(), 1);
 
     let _ = fs::remove_dir_all(&dir);
@@ -423,44 +343,25 @@ fn legacy_injections_are_migrated_in_place() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-
-/// v2（`handleDomReady()` 与注入直连）→ 现状（恒开壳 + 注入填空位）：已装好的副本里是 v2 文本，
-/// 段首是 `.on("dom-ready",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&…`——
-/// 迁移必须认出这个旧起点并整段换成壳，否则用户升级后又要手工删副本。
+/// v2 形态（`handleDomReady()` 与注入直连）的老副本 → 现状（只有恒开壳）：
+/// 段首是 `.on("dom-ready",(()=>{this.handleDomReady(),this.isBrowserViewValid()&&…`。
+/// 这种老文本靠 old 精确匹配必然失配，0c 段必须认出起点、整段收回壳。
 #[test]
-fn v2_promo_segment_is_migrated_to_shell() {
+fn v2_promo_segment_is_retracted_to_shell() {
     let dir = std::env::temp_dir().join("tvx-patch-promo-v2-test");
+    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let f = dir.join("index.js");
 
-    let p = PATCHES
-        .iter()
-        .find(|q| q.new.contains("__tvxGuard"))
-        .expect("页内推广浮层补丁应在补丁集里");
-    let guard = p
-        .new
-        .strip_prefix("t.handleDomReady(),void t.executeJavaScript(\"")
-        .and_then(|r| r.strip_suffix("\").catch((()=>{}))"))
-        .expect("当前补丁文本必须符合「空位 + 脚本 + 收尾」的结构");
-    // 显式拼接，避免 format! 的 `}}` 转义把收尾括号算错一位
     let mut v2 = String::new();
     v2.push_str(PROMO_SEG_HEAD_V2);
-    v2.push_str(guard);
+    v2.push_str(PROMO_GUARD);
     v2.push_str(PROMO_SEG_END_MARK);
     v2.push_str("}))");
 
-    // 旧副本形态：Core 的位置放 v2 段，推广补丁的小段不存在
     let src: String = PATCHES
         .iter()
-        .map(|q| {
-            if q.name == p.name {
-                ""
-            } else if q.group == Group::Core {
-                v2.as_str()
-            } else {
-                q.new
-            }
-        })
+        .map(|q| if q.group == Group::Core { v2.as_str() } else { q.new })
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(&f, &src).unwrap();
@@ -470,7 +371,7 @@ fn v2_promo_segment_is_migrated_to_shell() {
     let after = fs::read_to_string(&f).unwrap();
     assert!(!after.contains(PROMO_SEG_HEAD_V2), "v2 段首应被换掉");
     assert!(core_shell_present(&after), "应迁移成壳（带就绪重试）");
-    assert!(after.contains("__tvxGuard"), "注入应按开关补上");
+    assert!(!after.contains("__tvxGuard"), "老脚本不应再留在页面上");
     assert_eq!(after.matches("browser view not ready, retrying").count(), 1);
     assert!(is_patched(&f, &Flags::default()));
 
@@ -528,18 +429,7 @@ fn apply_respects_flags_and_is_reversible() {
     // pristine = 全部补丁 old 依序拼接（apply 按组应用组内全部补丁，
     // 所以每个 old 都必须恰好出现一次；old 之间互不包含已由
     // patches_are_self_consistent 覆盖）
-    // 推广补丁的 old/new 只是壳内的一小段（空位 ↔ 注入），不是独立语句：
-    // 它在文件里的形态由 Core 的 old（原始调用）或 new（壳）决定，拼接时跳过。
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
-    let pristine: String = PATCHES
-        .iter()
-        .filter(|p| p.name != promo_name)
-        .map(|p| p.old)
-        .collect();
+    let pristine: String = PATCHES.iter().map(|p| p.old).collect();
 
     // 各功能组各取代表补丁，便于后半段断言
     let adblock: Vec<&Patch> = PATCHES
@@ -592,7 +482,6 @@ fn apply_respects_flags_and_is_reversible() {
     // 只有 Auth 组生效时的目标文本
     let keep_auth: String = PATCHES
         .iter()
-        .filter(|p| p.name != promo_name)
         .map(|p| {
             if p.group == Group::Auth || p.group == Group::Core {
                 p.new
@@ -794,14 +683,8 @@ fn apply_degrades_per_patch_and_survives_renames() {
 
     // 用所有补丁的 old 拼出一份"原始" index.js。
     // 推广补丁的 old 只是壳内空位、不是独立语句，跳过（由 Core 的 old 提供落点）。
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
     let pristine: String = PATCHES
         .iter()
-        .filter(|p| p.name != promo_name)
         .map(|p| p.old)
         .collect::<Vec<_>>()
         .join("\n");
@@ -871,14 +754,8 @@ fn failing_patches_names_what_did_not_apply() {
     fs::create_dir_all(&dir).unwrap();
     let idx = dir.join("index.js");
 
-    let promo_name = PATCHES
-        .iter()
-        .find(|p| p.new.contains("__tvxGuard"))
-        .map(|p| p.name)
-        .expect("页内推广浮层补丁应在补丁集里");
     let pristine: String = PATCHES
         .iter()
-        .filter(|p| p.name != promo_name)
         .map(|p| p.old)
         .collect::<Vec<_>>()
         .join("\n");
@@ -913,3 +790,99 @@ fn failing_patches_names_what_did_not_apply() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+
+/// 门禁：任何补丁文本里都不许再出现"隐藏已渲染 DOM"的做法。
+///
+/// 2026-11-26 下线了「页内推广浮层插入即拦截」：它靠「文案含几个套餐名 + 面积够大 +
+/// 祖先像弹窗」猜，误伤自己打开的说明卡、又漏掉文案无关的投放。这条用例把门钉死，
+/// 防止哪天又被加回来。
+#[test]
+fn no_dom_hiding_injection_remains() {
+    let banned = ["display','none'", "display', 'none'", "MutationObserver", "data-tvx-hidden", "__tvxGuard"];
+    for p in PATCHES {
+        for b in banned {
+            assert!(
+                !p.new.contains(b),
+                "补丁「{}」里出现了 {} —— 按文案/面积隐藏已渲染内容会误伤，别再这样拦",
+                p.name,
+                b
+            );
+        }
+    }
+}
+
+/// 误拦回归：把广告拦截那条正则原文取出来，交给 node 跑真实语料。
+///
+/// 两个方向都要对：推广数据必须拦住，同一个域名下的正常接口必须放行。
+/// 用 eval 拼回**字面量**而不是 new RegExp —— 后者里 `/` 不需要转义，
+/// 「把 / 写进 /…/ 却没转义」这种致命错误会被它放过（2026-11-27 踩过）。
+#[test]
+fn adblock_regex_blocks_promo_feed_only() {
+    let p = PATCHES
+        .iter()
+        .find(|q| q.new.contains("onBeforeRequest"))
+        .expect("广告域名补丁应在补丁集里");
+    let body = p
+        .new
+        .split_once("cancel:/")
+        .and_then(|(_, r)| r.split_once("/.test("))
+        .map(|(b, _)| b)
+        .expect("补丁文本里找不到 onBeforeRequest 的正则字面量");
+
+    if std::process::Command::new("node").arg("--version").output().is_err() {
+        eprintln!("跳过误拦回归：本机没有 node");
+        return;
+    }
+    let dir = std::env::temp_dir().join("tvx-adblock-corpus2");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let js = dir.join("corpus.js");
+    fs::write(&js, ADBLOCK_CORPUS_JS).unwrap();
+
+    let out = std::process::Command::new("node")
+        .arg(&js)
+        .arg(body)
+        .output()
+        .expect("node 启动失败");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "误拦/漏拦：\n{stdout}\n{stderr}");
+    assert!(stdout.contains("ok"), "语料没跑完：{stdout}{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 语料：左边是必须拦住的广告/推广，右边是必须放行的正常流量。
+const ADBLOCK_CORPUS_JS: &str = r#"
+const body = process.argv[2];
+let A;
+try { A = eval('/' + body + '/'); } catch (e) { console.log('正则本身解析失败: ' + e.message); process.exit(2); }
+
+const mustBlock = [
+  'https://cn.tradingview.com/api/v1/offers/',
+  'https://www.tradingview.com/api/v1/offers/?locale=zh',
+  'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
+  'https://doubleclick.net/pixel.gif',
+  'https://trc.taboola.com/collect',
+  'https://cdn.taboola.com/libtrc/loader.js',
+  'https://ads.rubiconproject.com/ad/1234'
+];
+
+const mustPass = [
+  'https://cn.tradingview.com/chart/3c2rLYX0/',
+  'https://cn.tradingview.com/api/v1/symbols_list/colored/?source=web-tvd',
+  'https://cn.tradingview.com/api/v1/symbols_list/active/?source=web-tvd',
+  'https://cn.tradingview.com/api/v1/study-templates',
+  'https://cn.tradingview.com/api/v1/brokers/trading_panel',
+  'https://static.tradingview.com/static/bundles/paywall-ad-free.19a2e325.js',
+  'https://auth.tradingview.com/accounts/tvd/connect/?locale=zh_CN&key=abc',
+  'https://www.tradingview.com/x/AbCdEf12/'
+];
+
+const bad = [];
+mustBlock.forEach(u => { if (!A.test(u)) bad.push('漏拦: ' + u); });
+mustPass.forEach(u => { if (A.test(u)) bad.push('误拦: ' + u); });
+
+if (bad.length) { console.log(bad.join('\n')); process.exit(1); }
+console.log('ok');
+"#;

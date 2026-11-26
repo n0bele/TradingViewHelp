@@ -28,7 +28,7 @@ pub static ZH: S = S {
     btn_doctor: "自检",
     features: "功能",
     cb_adblock: "拦截广告弹窗",
-    cb_adblock_hint: "广告域名直接拦掉；充值/订阅窗口不再打开，图表里的推广浮层就地隐藏",
+    cb_adblock_hint: "广告域名直接拦掉；充值/订阅窗口不再打开；网页自己取的活动数据（/api/v1/offers/）也拦掉，整屏推广没有数据就画不出来。不按文案去猜、不隐藏页面上已经显示的内容",
     cb_charts: "多图表布局解锁",
     cb_charts_hint: "客户端 gate：free 档上限 1，注入后放行",
     cb_study: "指标叠加解锁",

@@ -176,6 +176,8 @@ pub const DOM_READY_ORIG: &str = ".on(\"dom-ready\",(()=>{this.handleDomReady()}
 /// 轮询壳里留给注入的"空位"：Core 补丁的 new 写成 `…t.handleDomReady(),void 0;…`，
 /// 推广补丁把这一小段替换成 `…,void t.executeJavaScript("…")`。
 /// 空位与填充分开，是为了让「等视图就绪」这件事不再挂在任何功能开关上。
+// 只给测试用：迁移回归要按这一小段空位造"老副本"。
+#[allow(dead_code)]
 pub const SHELL_HOOK: &str = "t.handleDomReady(),void 0";
 
 /// `.on("dom-ready",…)` 的轮询壳：等 BrowserView 就绪再调 `handleDomReady()`，
@@ -266,32 +268,14 @@ pub const PATCHES: &[Patch] = &[
         new: "null==n||!1===(0,M.HU)(n))return;if(/(pricing|subscribe|subscription|billing|upgrade|go-?pro|promo|trial|paywall|pro-?plans)/i.test(String(n)))return;const o={url:n};",
     },
     Patch {
-        name: "页内推广浮层插入即拦截",
-        name_en: "Intercept in-page upgrade popups before they paint",
-        group: Group::AdBlock,
-        // 前三条只管壳层（独立窗口 / IPC）。TradingView 把升级提示改成了图表页自己渲染的
-        // React 浮层，壳层补丁看不到它。v1 用"1.2 秒轮询 + 文案匹配 + 点关闭"来兜，
-        // 实战漏了两张（文案里没有 TradingView 的那张指标数量卡、以及点了没用的 ×）：
-        // 判定发生在浮层已经画出来之后，本质上仍是"事后清理"。
-        // v2 改成 MutationObserver：节点插入 DOM 的微任务里就判定并隐藏，命中即不上屏；
-        // 识别只看不翻译的结构与品牌词，不再要求某种语言的标题文案。
-        // v3 的「等视图就绪」由恒开的 Core 补丁提供（见 DOM_READY_SHELL）；本条只往壳的
-        // 空位（SHELL_HOOK）里填注入脚本——这样单独关掉「拦截广告弹窗」不会把重试壳一起关掉。
-        // 原来的写法是 `{this.handleDomReady(),this.isBrowserViewValid()&&executeJavaScript(…)}`，
-        // 首次 dom-ready（视图未就绪）时整段跳过且不重试，实测启动后 48~56 秒零注入。
-        // 现在 DIS 只认真正的断线句（关闭了这个连接 / 连接已关闭 / We closed this connection…）。
-        old: SHELL_HOOK,
-        new: "t.handleDomReady(),void t.executeJavaScript(\"(function(){try{if(window.__tvxGuard)return;window.__tvxGuard=1;var ATTR='data-tvx-hidden';var BUY=/upgrade|pricing|subscribe|subscription|plans?|升级|升級|订阅|訂閱|方案|套餐|abonn|подписк|тариф|プラン|요금|업그레이드/i;var LIM=/limit|maximum|reached|exceed|no more|上限|最大|最多|已达|已達|限制|превыш|достиг/i;var TIER=/basic|essential|premium|ultimate|advanced/gi;var BR=/tradingview/i;var DIS=/恢复连接|关闭了这个连接|连接已关闭|连接已断开|Restore connection|We closed this connection|Connection closed/i;function vw(){return Math.max(document.documentElement.clientWidth||0,window.innerWidth||0)}function vh(){return Math.max(document.documentElement.clientHeight||0,window.innerHeight||0)}function tiers(s){var m=s.match(TIER),o={},c=0,i,k;if(!m)return 0;for(i=0;i<m.length;i++){k=m[i].toLowerCase();if(!o[k]){o[k]=1;c++}}return c}function hasChart(e){try{return !!(e&&e.querySelector&&e.querySelector('canvas'))}catch(x){return !1}}function big(e){try{if(!e||!e.querySelectorAll)return 0;var q=e.querySelectorAll('video,img,iframe'),n=q.length>20?20:q.length,i,area=vw()*vh()*0.05,r;for(i=0;i<n;i++){r=q[i].getBoundingClientRect();if(r.width*r.height>=area)return 1}return 0}catch(x){return 0}}function hide(e){try{if(!e||e.nodeType!==1||e.__tvxH)return;if(e.closest&&e.closest('#tvx-alerts-host'))return;if(e===document.body||e===document.documentElement||e.id==='root')return;if(hasChart(e))return;e.__tvxH=1;e.style.setProperty('display','none','important');e.setAttribute(ATTR,'1');window.__tvxHid=(window.__tvxHid||0)+1;try{console.log('[tvx] hid paywall overlay',e.tagName,(e.getAttribute('data-name')||e.className||'').toString().slice(0,80))}catch(x){}try{if(document.body)document.body.style.removeProperty('overflow');document.documentElement.style.removeProperty('overflow')}catch(x){}}catch(x){}}function climb(e){var c=e,b=null;while(c&&c.parentNode&&c.parentNode!==document.documentElement){if(c===document.body||c.id==='root'||hasChart(c))break;var r=c.getBoundingClientRect();if(r.width>=vw()*0.8&&r.height>=vh()*0.8)b=c;c=c.parentElement}return b||e}function promo(e){try{if(!e||e.nodeType!==1)return 0;if(e.closest&&e.closest('#tvx-alerts-host'))return 0;if(e===document.body||e===document.documentElement||e.id==='root')return 0;if(hasChart(e))return 0;if(!e.querySelector)return 0;if(!e.querySelector('button,[role=button],a[href],video,img,iframe'))return 0;var t=e.textContent||'';if(!t||t.length>8000)return 0;if(DIS.test(t))return 0;var k=tiers(t),buy=BUY.test(t),lim=LIM.test(t),br=BR.test(t),m=big(e);if(k>=2&&(buy||br||lim))return 1;if(br&&buy&&m)return 1;if(buy&&lim&&(m||k>=1))return 1;return 0}catch(x){return 0}}function bigFrame(e){try{if(!e||e.tagName!=='IFRAME')return 0;var r=e.getBoundingClientRect();return r.width>=vw()*0.35&&r.height>=vh()*0.35?1:0}catch(x){return 0}}var O={childList:!0,subtree:!0},mo=null,budget=0;function watch(r){try{mo.observe(r,O)}catch(x){}}function scan(n){try{if(!n||n.nodeType!==1)return;if(bigFrame(n)){hide(n);return}if(n.shadowRoot)watch(n.shadowRoot);if(budget>80)return;if(!n.querySelector)return;if(!n.querySelector('button,[role=button],a[href],video,img,iframe'))return;budget++;if(promo(n))hide(climb(n))}catch(x){}}function sweep(){try{var q=document.querySelectorAll('iframe,[role=dialog],dialog,[class*=overlay],[class*=modal],[class*=popup],[class*=paywall],[data-name*=paywall],[data-name*=dialog]'),i,e;for(i=0;i<q.length;i++){e=q[i];if(e.__tvxH)continue;if(bigFrame(e)){hide(e);continue}if(promo(e))hide(climb(e))}}catch(x){}}try{mo=new MutationObserver(function(ms){budget=0;var i,j,a;for(i=0;i<ms.length;i++){a=ms[i].addedNodes;for(j=0;j<a.length;j++)scan(a[j])}});mo.observe(document,O)}catch(x){}setTimeout(sweep,0);setTimeout(sweep,1500);setInterval(sweep,1e3)}catch(e){}})();\").catch((()=>{}))",
-    },
-    Patch {
-        name: "广告/追踪域名网络拦截",
-        name_en: "Ad/tracker domain blocking",
+        name: "广告域名与推广数据网络拦截",
+        name_en: "Block ad domains and the promo offer feed",
         group: Group::AdBlock,
         // 挂在既有 initSession 的 webRequest 配置处（onBeforeSendHeaders 之后，
         // will-download 注册之前）。实测当前图表页无广告 DOM，此为预防性网络层拦截，
         // 命中第三方广告网络（Google Ads 系/Taboola/Outbrain 等常见买量网络）时直接取消。
         old: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.on(\"will-download\",Zu)",
-        new: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.webRequest.onBeforeRequest(((e,r)=>{r({cancel:/(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|googletagservices\\.com|adservice\\.google\\.|taboola\\.com|outbrain\\.com|amazon-adsystem\\.com|adsrvr\\.org|rubiconproject\\.com)/.test(e.url)})})),e.on(\"will-download\",Zu)",
+        new: "r({cancel:!1,requestHeaders:e.requestHeaders})})),e.webRequest.onBeforeRequest(((e,r)=>{r({cancel:/(doubleclick\\.net|googlesyndication\\.com|googleadservices\\.com|googletagservices\\.com|adservice\\.google\\.|tradingview\\.com\\/api\\/v1\\/offers\\/|taboola\\.com|outbrain\\.com|amazon-adsystem\\.com|adsrvr\\.org|rubiconproject\\.com)/.test(e.url)})})),e.on(\"will-download\",Zu)",
     },
     Patch {
         name: "多图表布局解锁注入（客户端 gate）",
