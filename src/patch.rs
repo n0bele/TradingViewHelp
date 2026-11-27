@@ -1,4 +1,4 @@
-//! 补丁集：1) 不弹订阅框；2) 拦截第三方广告/追踪域名；3) 解锁多图表布局与指标叠加的
+//! 补丁集：1) 拦自动推广的数据源（广告域名 + 活动 feed）；2) 解锁多图表布局与指标叠加的
 //! 客户端 gate；4) 禁用启动时的自动更新检查。
 //!
 //! 指标数量 / 布局保存 / 警报数量等限制由服务端强制（实测：指标走服务端拒绝码
@@ -33,8 +33,13 @@ pub use data::*;
 
 /// 用户可配置的功能开关（持久化在 tvx 的 config.json）。
 /// 拦截广告弹窗 / 多图表解锁 / 指标叠加解锁 / 绘图数量解锁 / 禁用自动更新 / 断线自愈
-/// 各自独立。拦截广告弹窗是**一个**功能：网络层拦广告域名、壳层不再开充值窗口、
-/// 图表页内推广浮层就地隐藏——三者对用户是同一件事（窗口别弹出来），所以共用一个开关。
+/// 各自独立。拦截广告弹窗是**一个**功能：广告域名 + 活动 feed（`/api/v1/offers/`）
+/// 一起断掉——自动促销拿不到数据就画不出来。
+///
+/// 边界（2026-11-27 用户实测后定）：**不碰用户主动点开的路径**。曾经拦过
+/// `showPaywall` / `requestProFeature` / 付费页开窗，结果点「Get real-time」这类
+/// 功能按钮完全没反应——那条链路是"点功能 → 没权限 → 弹付费墙"，全由用户触发。
+/// 自动推广不走那里，所以壳层拦截已整体退役（见 `data::RETIRED`）。
 /// 登录回调直达不在其中：它是多账号能用起来的前提（见 `Group::Auth`），恒开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
@@ -43,6 +48,9 @@ pub struct Flags {
     pub study_on_study: bool,
     /// 单张图表的绘图数量上限（free 档 30）：客户端 gate，注入后不限
     pub drawings_unlock: bool,
+    /// 回测报告的**客户端**判定项：策略报告里 14 项付费指标显示真实数值
+    /// （高精度 K 线 / 每根历史 tick / 深回测由服务端算力决定，不在其中）
+    pub backtest_unlock: bool,
     pub no_auto_update: bool,
     /// 断线自愈：检测到「连接已关闭 / 恢复连接」弹窗时自动点恢复、必要时重载页面
     pub auto_recover: bool,
@@ -58,6 +66,7 @@ impl Default for Flags {
             charts_unlock: true,
             study_on_study: true,
             drawings_unlock: true,
+            backtest_unlock: true,
             no_auto_update: true,
             auto_recover: true,
             alerts: true,
@@ -83,6 +92,11 @@ pub enum Group {
     StudyOnStudy,
     /// 单张图表的绘图数量（DRAWINGS_ON_CHART）客户端 gate 解锁
     Drawings,
+    /// 回测报告显示层的客户端 gate：策略报告里 14 项付费指标（夏普、相关性、
+    /// 最大盈亏、连胜连败、回撤等）锁定时只画锁按钮不画数值，解锁后出真实数值。
+    /// 高精度历史 K 线 / 每根历史 tick / 深回测由服务端算力决定（实测放行后
+    /// 报告直接变空 + 升级提示），不放进这组。
+    Backtest,
     /// 禁用启动时的自动更新检查
     NoAutoUpdate,
     /// 登录回调直达：每个实例把 `--user-data-dir` 写进 tradingview:// 注册，
@@ -108,6 +122,7 @@ impl Group {
             Group::Charts => f.charts_unlock,
             Group::StudyOnStudy => f.study_on_study,
             Group::Drawings => f.drawings_unlock,
+            Group::Backtest => f.backtest_unlock,
             Group::NoAutoUpdate => f.no_auto_update,
             Group::Auth => true,
             Group::Recover => f.auto_recover,
@@ -180,21 +195,8 @@ struct WildAnchor {
 }
 
 const WILD_ANCHORS: &[WildAnchor] = &[
-    WildAnchor {
-        patch: "订阅遮罩窗口不再创建",
-        from: "async function {}(e,t){const n=(0,{}.{})().getLastFocusedWindow();",
-        to: "async function {}(e,t){return;const n=(0,{}.{})().getLastFocusedWindow();",
-    },
-    WildAnchor {
-        patch: "showPaywall 变空操作",
-        from: "showPaywall(e,t){return {}(e,t)}",
-        to: "showPaywall(e,t){return Promise.resolve()}",
-    },
-    WildAnchor {
-        patch: "网页内充值窗口不再注入",
-        from: "async requestProFeature(){const e=(0,{}.{})().getLastFocusedWindow();",
-        to: "async requestProFeature(){return;const e=(0,{}.{})().getLastFocusedWindow();",
-    },
+    // 原先这里还有 `vL` / `showPaywall` / `requestProFeature` 三条通配锚点，
+    // 随那三条付费墙补丁一起退役（见 data.rs 的 RETIRED）。
     WildAnchor {
         // 启动链里唯一一次自动检查；取用函数名（`tp`→`op`）也算标识符，一并通配。
         patch: "启动自动更新检查禁用",
@@ -371,6 +373,19 @@ pub fn apply(index_js: &Path, flags: &Flags) -> Result<ApplyReport> {
     // 历史注入脚本升级失配只算告警：后面的常规流程仍会给这条补丁一个准确状态，
     // 不能因为一段旧文本没对上就整批失败。
     let mut warnings: Vec<String> = Vec::new();
+
+    // 0a) 退役：有的规则后来被判定为误伤——它拦到的是用户主动操作，而不是自动推广。
+    //     开关没变，走不到下面"开关关 → new 换回 old"的撤回分支，只能无条件还原。
+    //     幂等：还原后原文就在文件里，下一次不再命中 patched 形态。
+    for (name, patched, original) in RETIRED {
+        if !src.contains(patched) {
+            continue;
+        }
+        match src.matches(patched).count() {
+            1 => src = src.replacen(patched, original, 1),
+            n => warnings.push(format!("{name}：退役期望 1 处匹配，实际 {n} 处")),
+        }
+    }
 
     // 0) 历史注入文本先就地升级：已装好的副本里还是旧脚本时，新版锚点是对不上的。
     //    按当前开关决定升级成新脚本（开）还是撤回成原始锚点（关）。
@@ -572,17 +587,33 @@ fn strip_bridge(src: &str) -> String {
     out
 }
 
-/// 把报警功能所需的文件落到托管副本里（开关打开时写入，关闭时清掉）。
+/// 去掉 preload 里的推广守卫（整行），同样收掉多余空行。
+fn strip_promo_guard(src: &str) -> String {
+    let mut out = String::new();
+    for line in src.split_inclusive('\n') {
+        if !line.contains(PROMO_GUARD_MARK) {
+            out.push_str(line);
+        }
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    out
+}
+
+/// 把报警功能所需的文件落到托管副本里（开关打开时写入，关闭时清掉），
+/// 并按「拦截广告弹窗」开关维护 preload 里的推广守卫。
 ///
-/// 这三个文件与 index.js 里那条 `require("./tvx-alerts-main.js")` 一起构成完整功能：
+/// 三个报警文件与 index.js 里那条 `require("./tvx-alerts-main.js")` 一起构成完整功能：
 /// - tvx-alerts-engine.js：图表页脚本（设置页 UI + 指标条件求值）
 /// - tvx-alerts-main.js：主进程模块（IPC / 持久化 / 通知 / 邮件）
 /// - preload/platform-preload.js 末尾的桥（幂等追加，可按标记整段撤回）
 ///
-/// 关闭开关时全部移除，副本回到"没有报警功能"的干净状态。
+/// 推广守卫（`PROMO_GUARD_JS`）挂在同一个 preload 里：它必须在图表页脚本之前执行，
+/// 否则页面那条 10 分钟定时器已经把无关闭按钮的升级墙挂上了。
 ///
 /// 返回 warnings：不致命但会让功能静默失效的情况（例如 preload 不在预期路径，
-/// 桥写不进去 → 引擎第一行就退出，用户只看到"按钮不见了"）。
+/// 桥或守卫写不进去）。
 pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<Vec<String>> {
     let mut warnings: Vec<String> = Vec::new();
     let engine = app_dir.join("tvx-alerts-engine.js");
@@ -593,45 +624,49 @@ pub fn install_assets(app_dir: &Path, flags: &Flags) -> Result<Vec<String>> {
         fs::write(&engine, ALERTS_ENGINE_JS)
             .with_context(|| format!("写入 {}", engine.display()))?;
         fs::write(&main, ALERTS_MAIN_JS).with_context(|| format!("写入 {}", main.display()))?;
+    } else {
+        let _ = fs::remove_file(&engine);
+        let _ = fs::remove_file(&main);
+    }
 
-        if !preload.is_file() {
-            // 桥是报警功能的前提：没有它，图表页脚本第一行就 return。
-            // 以前这里静默跳过，副本看起来"构建成功"，实际报警全无。
+    if !preload.is_file() {
+        if flags.alerts || flags.adblock {
+            // 桥是报警功能的前提；守卫是"自动升级墙"的第一道拦截。缺了都得说清楚，
+            // 否则副本看起来"构建成功"，实际功能静默失效。
             warnings.push(format!(
-                "preload 路径不存在（{}），报警桥写不进去——报警功能将不可用。\
-                 处理：点「生成 / 更新副本」重建；仍不行说明该版本目录结构不同，请反馈",
+                "preload 路径不存在（{}），报警桥/推广守卫写不进去——报警与广告拦截的页内部分将不可用。\
+                 处理：点「重建副本」重建；仍不行说明该版本目录结构不同，请反馈",
                 preload.display()
             ));
-        } else {
-            let src = fs::read_to_string(&preload)
-                .with_context(|| format!("读取 {}", preload.display()))?;
-            // 桥可能来自旧版本（比如还没暴露 dump 通道）。按标记整行换掉，再追加当前桥，
-            // 这样升级时不会把旧桥留在页面里。
-            let out = if !src.contains(PRELOAD_BRIDGE_MARK) || !src.contains("tvx-alerts:dump") {
-                let mut cleaned = strip_bridge(&src);
-                cleaned.push_str(PRELOAD_BRIDGE);
-                Some(cleaned)
-            } else {
-                None
-            };
-            if let Some(out) = out {
-                fs::write(&preload, out)
-                    .with_context(|| format!("写入 {}", preload.display()))?;
-            }
         }
         return Ok(warnings);
     }
 
-    let _ = fs::remove_file(&engine);
-    let _ = fs::remove_file(&main);
-    if preload.is_file() {
-        let src = fs::read_to_string(&preload)
-            .with_context(|| format!("读取 {}", preload.display()))?;
-        if src.contains(PRELOAD_BRIDGE_MARK) {
-            let out = strip_bridge(&src);
-            fs::write(&preload, out)
-                .with_context(|| format!("写入 {}", preload.display()))?;
+    let src = fs::read_to_string(&preload)
+        .with_context(|| format!("读取 {}", preload.display()))?;
+    let mut out = src.clone();
+
+    // 报警桥：桥可能来自旧版本（比如还没暴露 dump 通道）。按标记整行换掉，再追加当前桥。
+    if flags.alerts {
+        if !out.contains(PRELOAD_BRIDGE_MARK) || !out.contains("tvx-alerts:dump") {
+            out = strip_bridge(&out);
+            out.push_str(PRELOAD_BRIDGE);
         }
+    } else if out.contains(PRELOAD_BRIDGE_MARK) {
+        out = strip_bridge(&out);
+    }
+
+    // 推广守卫：跟随「拦截广告弹窗」，开则写、关则撤（撤回后与官方原文逐字一致）。
+    if flags.adblock {
+        if !out.contains(PROMO_GUARD_MARK) {
+            out.push_str(PROMO_GUARD_JS);
+        }
+    } else if out.contains(PROMO_GUARD_MARK) {
+        out = strip_promo_guard(&out);
+    }
+
+    if out != src {
+        fs::write(&preload, out).with_context(|| format!("写入 {}", preload.display()))?;
     }
     Ok(warnings)
 }

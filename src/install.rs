@@ -220,6 +220,9 @@ pub struct Config {
     /// 单张图表的绘图数量上限（free 档 30，客户端 gate）
     #[serde(default = "default_true")]
     pub drawings_unlock: bool,
+    /// 回测报告的客户端判定项（策略报告 14 项扩展指标），服务端算力项不在其中
+    #[serde(default = "default_true")]
+    pub backtest_unlock: bool,
     #[serde(default = "default_true")]
     pub no_auto_update: bool,
     /// 断线自愈：连接被服务端关闭时自动点恢复 / 重载页面
@@ -239,6 +242,7 @@ impl Default for Config {
             charts_unlock: true,
             study_on_study: true,
             drawings_unlock: true,
+            backtest_unlock: true,
             no_auto_update: true,
             auto_recover: true,
             alerts: true,
@@ -253,6 +257,7 @@ impl Config {
             charts_unlock: self.charts_unlock,
             study_on_study: self.study_on_study,
             drawings_unlock: self.drawings_unlock,
+            backtest_unlock: self.backtest_unlock,
             no_auto_update: self.no_auto_update,
             auto_recover: self.auto_recover,
             alerts: self.alerts,

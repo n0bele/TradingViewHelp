@@ -254,6 +254,29 @@ pub fn doctor_report() -> String {
                      \x20       上游代码结构变了才会这样，重建副本通常也修不了，请把这份报告反馈\n",
                 );
             }
+
+            // 页内推广守卫写在 preload 里：它比页面脚本早，负责关掉那个
+            // "登录后 10 分钟自动弹、没有关闭按钮"的桌面端升级墙的定时器。
+            // 主进程补丁全绿也不代表它在——preload 是另一个文件，漏了同样要单独说。
+            if cfg.flags().adblock {
+                let preload = m
+                    .index_js()
+                    .parent()
+                    .map(|p| p.join("preload").join("platform-preload.js"));
+                let ok = preload
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .map(|t| t.contains(patch::PROMO_GUARD_MARK))
+                    .unwrap_or(false);
+                s.push_str(&format!(
+                    "页内推广守卫: {}\n",
+                    if ok {
+                        "已就位"
+                    } else {
+                        "缺失 —— 自动升级墙仍会弹；点「重建副本」修复"
+                    }
+                ));
+            }
             if m.asar_residue() {
                 s.push_str(&format!(
                     "⚠ 旧包残留: {}\n",
@@ -264,13 +287,13 @@ pub fn doctor_report() -> String {
                      \x20       （界面可能仍显示“补丁完整”，但所有功能都不生效）\n\
                      怎么做:\n\
                      \x20 1. 关掉所有客户端窗口（或在任务管理器结束 TradingView.exe）\n\
-                     \x20 2. 打开助手，拨动任意一个开关 —— 会自动删掉这个文件；也可点「生成 / 更新副本」\n\
+                     \x20 2. 打开助手，拨动任意一个开关 —— 会自动重打补丁并删掉这个文件\n\
                      \x20 3. 重新启动客户端\n\
                      \x20 若仍删不掉：把该目录加入杀软白名单，或手动删除上面列出的文件后重试\n",
                 );
             }
         }
-        None => s.push_str("副本: 未构建\n  怎么做: 在界面里点「生成 / 更新副本」\n"),
+        None => s.push_str("副本: 未构建\n  怎么做: 点「添加」创建账号，首次会自动生成副本\n"),
     }
     s
 }

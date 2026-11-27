@@ -10,15 +10,15 @@ pub static EN: S = S {
     no_tv_alert: "⚠ TradingView is not installed. Please install the TradingView desktop app before using this tool.\nAfter installing, come back and click \"Rescan\". If it is installed but not detected, specify the install folder manually below.",
     rescan: "Rescan",
     copy_none: "● Copy not built",
-    copy_none_hint: "Click \"Build / Update copy\" on the right",
+    copy_none_hint: "Click \"Add\" — the copy is built automatically on first account",
     copy_ok: "● Copy {v} · patches OK",
     copy_ok_hint: "Anchors extracted from this version's index.js and verified end-to-end; toggling options re-applies automatically",
     copy_bad: "● Copy {v} · patches broken",
-    copy_bad_hint: "Click \"Build / Update copy\" to repair",
+    copy_bad_hint: "Run \"Self-check\" and send the report; `[!] name` in the log is the patch that missed",
     copy_stale: "● Copy {v} · stale package",
     copy_stale_hint: "The copy still contains the original app.asar, which the client loads first — \
-                      no patch will take effect.\nToggle any option or click \"Build / Update copy\" and it \
-                      gets removed automatically;\nif the client is running, click \"Stop all\" first, \
+                      no patch will take effect.\nToggling any option re-applies the patches and \
+                      removes it automatically;\nif the client is running, click \"Stop all\" first, \
                       otherwise the file stays locked.",
     copy_unverified: "● Copy {v} · unverified (anchors checked against {refv})",
     copy_unverified_hint: "Patch anchors are literal code strings; minified identifiers drift between versions. On mismatch the build fails loudly instead of half-applying",
@@ -29,13 +29,15 @@ pub static EN: S = S {
     btn_doctor: "Self-check",
     features: "Features",
     cb_adblock: "Block ads & billing popups",
-    cb_adblock_hint: "Ad domains are cancelled; billing/subscription windows never open; the web app's campaign feed (/api/v1/offers/) is blocked too, so full-screen promos have no data to render. Nothing already rendered is hidden by guessing at copy",
+    cb_adblock_hint: "Blocks only what arrives on its own: ad domains and the campaign feed (/api/v1/offers/) are cancelled so full-screen promos have no data to render, and the timed desktop-only upgrade wall (no close button) is switched off too. Anything you open yourself — paywall pages, real-time data, upgrade flows — works as usual. Nothing already rendered is hidden by guessing at copy",
     cb_charts: "Multi-chart layouts",
     cb_charts_hint: "Client-side gate: free tier allows 1; the injection lifts it",
     cb_study: "Study-on-study",
     cb_study_hint: "Client-side gate: free tier child limit 1; the injection raises it",
     cb_drawings: "Unlimited drawings",
     cb_drawings_hint: "Client-side gate: free tier caps one chart at 30 drawings (hidden/locked ones count, deleting frees a slot); the injection stops the check. Verified: 40 drawings on one chart, no paywall, and the extra ones are saved server-side and survive a reload",
+    cb_backtest: "Backtest report extras",
+    cb_backtest_hint: "The 14 paid metrics in the strategy report (commission cost, Sharpe/Sortino, buy-and-hold correlation, liquidated volume, largest win/loss, streaks, drawdown and more) show their real values. High-resolution history, per-tick execution and Deep Backtesting depend on server compute and stay off",
     cb_recover: "Auto-recover on disconnect",
     cb_recover_hint: "When the site shows a \"connection closed\" / \"restore connection\" dialog, click restore; reload the page if still down after 4s, then retry after 15s / 1min / 5min (max 4 tries, dialog is kept if all fail). The counter resets after 1 minute without a dialog. Recovery only — it cannot raise the server-side connection quota",
     cb_noupdate: "Disable auto-update",

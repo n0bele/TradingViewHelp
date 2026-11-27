@@ -378,9 +378,9 @@ fn v2_promo_segment_is_retracted_to_shell() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// 上一版「页面开窗过滤」（正则里没有 paywall / pro-plans）必须能就地迁移：
-/// 副本里是"条件已插在 `return;` 与 `const o` 之间"的旧形态，原锚点已被拆开，
-/// 靠精确匹配会判成锚点未命中，从而整批失败。
+/// 上一版「页面开窗过滤」必须能就地迁移：副本里是"条件已插在 `return;` 与
+/// `const o` 之间"的旧形态，原锚点已被拆开，靠精确匹配会判成锚点未命中，整批失败。
+/// 两代旧文本都要认：v1 没拦 paywall，v2 连 paywall 一起拦（后者正是误伤手动点击的那版）。
 #[test]
 fn former_open_window_filter_is_migrated() {
     let dir = std::env::temp_dir().join("tvx-patch-openwin-test");
@@ -389,27 +389,60 @@ fn former_open_window_filter_is_migrated() {
 
     let p = PATCHES
         .iter()
-        .find(|q| q.new.contains("const o={url:n};") && q.new.contains("paywall"))
+        .find(|q| q.new.contains("const o={url:n};") && q.new.contains("promo"))
         .expect("开窗过滤补丁应在补丁集里");
-    let src: String = PATCHES
-        .iter()
-        .map(|q| {
-            if q.name == p.name {
-                LEGACY_OPEN_WINDOW_V1
-            } else {
-                q.new
-            }
-        })
-        .collect();
+    assert!(
+        !p.new.contains("paywall") && !p.new.contains("pricing"),
+        "开窗过滤不能再拦付费页——那是用户主动点开的"
+    );
+
+    for legacy in [LEGACY_OPEN_WINDOW_V1, LEGACY_OPEN_WINDOW_V2] {
+        let src: String = PATCHES
+            .iter()
+            .map(|q| if q.name == p.name { legacy } else { q.new })
+            .collect();
+        fs::write(&f, &src).unwrap();
+
+        let report = apply(&f, &Flags::default()).unwrap();
+        assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
+        let after = fs::read_to_string(&f).unwrap();
+        assert!(!after.contains(legacy), "旧文本应被替换：{legacy}");
+        assert!(after.contains(p.new), "应迁移成当前文本");
+        assert_eq!(after.matches(p.new).count(), 1);
+
+        // 幂等
+        apply(&f, &Flags::default()).unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), after);
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 退役的三条付费墙壳层补丁必须能从老副本里还原。
+///
+/// 它们的开关没变（仍属于「拦截广告弹窗」），走不到"开关关 → 撤回"那条分支，
+/// 只有 `RETIRED` 这一遍能救。漏了的话，用户升级后点「Get real-time」还是没反应。
+#[test]
+fn retired_paywall_gates_are_restored() {
+    let dir = std::env::temp_dir().join("tvx-patch-retired-test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("index.js");
+
+    // 模拟"改动前的副本"：其它补丁已打上，三条付费墙是拦截形态
+    let mut src: String = PATCHES.iter().map(|p| p.new).collect();
+    for (_, patched, _) in RETIRED {
+        src.push_str(patched);
+    }
     fs::write(&f, &src).unwrap();
 
     let report = apply(&f, &Flags::default()).unwrap();
-    assert!(report.failed.is_empty(), "不应有补丁失配：{:?}", report.failed);
+    assert!(report.failed.is_empty(), "退役不应失败：{:?}", report.failed);
     let after = fs::read_to_string(&f).unwrap();
-    assert!(!after.contains(LEGACY_OPEN_WINDOW_V1), "旧文本应被替换");
-    assert!(after.contains(p.new), "应迁移成当前文本");
-    assert_eq!(after.matches(p.new).count(), 1);
-
+    for (name, patched, original) in RETIRED {
+        assert!(!after.contains(patched), "{name} 的拦截形态应被撤掉");
+        assert!(after.contains(original), "{name} 应还原成原文");
+    }
     // 幂等
     apply(&f, &Flags::default()).unwrap();
     assert_eq!(fs::read_to_string(&f).unwrap(), after);
@@ -475,6 +508,7 @@ fn apply_respects_flags_and_is_reversible() {
         charts_unlock: false,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
@@ -512,6 +546,7 @@ fn apply_respects_flags_and_is_reversible() {
         charts_unlock: true,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
@@ -566,6 +601,8 @@ fn alerts_assets_are_written_and_removed() {
 
     let off = Flags {
         alerts: false,
+        // 推广守卫跟的是「拦截广告弹窗」，这里也关掉才能真正回到官方原文
+        adblock: false,
         ..Flags::default()
     };
     install_assets(&dir, &off).unwrap();
@@ -580,6 +617,44 @@ fn alerts_assets_are_written_and_removed() {
     assert!(fs::read_to_string(&preload)
         .unwrap()
         .contains(PRELOAD_BRIDGE_MARK));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// 推广守卫：跟着「拦截广告弹窗」开关落盘 / 撤回，且只写一次。
+///
+/// 这个守卫是"10 分钟自动弹出的无关闭按钮升级墙"的第一道拦截——它必须比页面脚本
+/// 更早执行，所以只能放在 preload 里；写成 localStorage 的 feature toggle，
+/// 页面那段 `isFeatureEnabled("tvd_paid_only_access")` 就恒为 false，定时器不挂。
+#[test]
+fn promo_guard_lives_in_preload_and_follows_adblock_flag() {
+    let dir = std::env::temp_dir().join("tvx-promo-guard-test");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("preload")).unwrap();
+    let preload = dir.join("preload").join("platform-preload.js");
+    let original = "console.log('x');\n";
+    fs::write(&preload, original).unwrap();
+
+    let on = Flags { adblock: true, ..Flags::default() };
+    install_assets(&dir, &on).unwrap();
+    let p = fs::read_to_string(&preload).unwrap();
+    assert_eq!(p.matches(PROMO_GUARD_MARK).count(), 1, "守卫只应写一次");
+    assert!(p.contains("forcefeaturetoggle.tvd_paid_only_access"));
+    assert!(p.contains("\"false\""), "必须写成 false，页面才判为功能关闭");
+    assert!(p.starts_with(original), "守卫只能追加，不能改写官方 preload");
+
+    // 幂等
+    install_assets(&dir, &on).unwrap();
+    assert_eq!(fs::read_to_string(&preload).unwrap(), p);
+
+    // 关掉广告拦截 → 守卫撤回，preload 逐字回到官方原文
+    let off = Flags { adblock: false, alerts: false, ..Flags::default() };
+    install_assets(&dir, &off).unwrap();
+    assert_eq!(fs::read_to_string(&preload).unwrap(), original);
+
+    // 再打开 → 回来
+    install_assets(&dir, &on).unwrap();
+    assert!(fs::read_to_string(&preload).unwrap().contains(PROMO_GUARD_MARK));
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -708,6 +783,7 @@ fn apply_degrades_per_patch_and_survives_renames() {
         charts_unlock: false,
         study_on_study: false,
         drawings_unlock: false,
+        backtest_unlock: false,
         no_auto_update: false,
         auto_recover: false,
         alerts: false,
@@ -717,10 +793,8 @@ fn apply_degrades_per_patch_and_survives_renames() {
 
     // 模拟上游重打包：压缩标识符全改名，字面锚点失配，通配锚点应接住
     let drifted = pristine
-        .replace("vL(e,t)", "xQ(e,t)")
-        .replace("(0,Le.Qh)()", "(0,Zz.Yy)()")
-        .replace("(0,M.j9)()", "(0,Wq.r8)()");
-    assert!(drifted.contains("xQ(e,t)"));
+        .replace("(0,M.j9)()||op().checkForUpdates()", "(0,Wq.r8)()||tp().checkForUpdates()");
+    assert!(drifted.contains("tp().checkForUpdates()"));
     fs::write(&idx, &drifted).unwrap();
     let fourth = apply(&idx, &on).unwrap();
     assert!(
@@ -729,18 +803,24 @@ fn apply_degrades_per_patch_and_survives_renames() {
         fourth.failed
     );
     let text = fs::read_to_string(&idx).unwrap();
-    assert!(text.contains("async function xQ(e,t){return;"));
-    assert!(text.contains("showPaywall(e,t){return Promise.resolve()}"));
-    assert!(text.contains("(0,Wq.r8)()||!0||op().checkForUpdates()"));
+    assert!(text.contains("(0,Wq.r8)()||!0||tp().checkForUpdates()"));
 
     // 真·结构变化（锚点彻底不存在）只让该条失败，其余照打
-    let broken = pristine.replace("showPaywall(e,t){return vL(e,t)}", "showPaywallV2(){}");
+    let broken = pristine.replace("(0,M.j9)()||op().checkForUpdates()", "startupUpdateCheckV2()");
     fs::write(&idx, &broken).unwrap();
     let fifth = apply(&idx, &on).unwrap();
-    assert!(fifth.failed.iter().any(|f| f.contains("showPaywall")));
-    assert!(!fifth.failed.iter().any(|f| f.contains("自动更新")));
+    assert!(fifth.failed.iter().any(|f| f.contains("自动更新")));
+    assert!(!fifth.failed.iter().any(|f| f.contains("推广")));
     let text = fs::read_to_string(&idx).unwrap();
-    assert!(text.contains("(0,M.j9)()||!0||op().checkForUpdates()"));
+    let charts_new = PATCHES
+        .iter()
+        .find(|p| p.group == Group::Charts)
+        .unwrap()
+        .new;
+    assert!(
+        text.contains(charts_new),
+        "一条锚点彻底消失不该拖累其它补丁"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -865,7 +945,13 @@ const mustBlock = [
   'https://doubleclick.net/pixel.gif',
   'https://trc.taboola.com/collect',
   'https://cdn.taboola.com/libtrc/loader.js',
-  'https://ads.rubiconproject.com/ad/1234'
+  'https://ads.rubiconproject.com/ad/1234',
+  // 10 分钟自动弹、没有关闭按钮的桌面端升级墙（模块名固定，hash 会变）
+  'https://static.tradingview.com/static/bundles/paywall-desktop-paid-only-access.c3835cd5e441dceaffeb.js',
+  'https://static.tradingview.com/static/bundles/paywall-desktop-paid-only-access.js',
+  // 加载图表即自动弹（实测 4.9s）的「脚本计算超时」整屏墙，没有关闭按钮
+  'https://static.tradingview.com/static/bundles/paywall-script-calculation-time.7558c9639c1e23eda8d8.js',
+  'https://static.tradingview.com/static/bundles/paywall-script-calculation-time.js'
 ];
 
 const mustPass = [
@@ -875,6 +961,12 @@ const mustPass = [
   'https://cn.tradingview.com/api/v1/study-templates',
   'https://cn.tradingview.com/api/v1/brokers/trading_panel',
   'https://static.tradingview.com/static/bundles/paywall-ad-free.19a2e325.js',
+  // 用户自己点「升级」才会打开的墙，必须放行（这些是主动操作，不是自动推广）
+  'https://static.tradingview.com/static/bundles/paywall-multiple-charts.abc123.js',
+  'https://static.tradingview.com/static/bundles/paywall-study-on-study.abc123.js',
+  // 名字相近但不是那面自动墙，别连坐
+  'https://static.tradingview.com/static/bundles/paywall-script-execution-on-history-bar.abc123.js',
+  'https://cn.tradingview.com/desktop/paywall/?feature=desktopPaidOnlyAccess',
   'https://auth.tradingview.com/accounts/tvd/connect/?locale=zh_CN&key=abc',
   'https://www.tradingview.com/x/AbCdEf12/'
 ];
@@ -886,3 +978,43 @@ mustPass.forEach(u => { if (A.test(u)) bad.push('误拦: ' + u); });
 if (bad.length) { console.log(bad.join('\n')); process.exit(1); }
 console.log('ok');
 "#;
+
+/// 回测增强：注入串与补丁字面文本逐字一致；补的是**付费档同形的空对象**，
+/// 且不含 `DEEP_HISTORY_BACKTEST`——深回测走独立 WebSocket、由服务端签发数据，
+/// 客户端把 flag 打开只会得到「按钮能点、点了报错」，比不解锁更糟（实测见补丁注释）。
+#[test]
+fn backtest_injection_matches_const() {
+    let p = PATCHES
+        .iter()
+        .find(|q| q.group == Group::Backtest)
+        .expect("回测增强补丁应在补丁集里");
+    assert!(p.new.contains(BACKTEST_UNLOCK));
+    assert!(
+        !BACKTEST_UNLOCK.contains('"'),
+        "整串嵌在 executeJavaScript(\"…\") 里"
+    );
+    // 只有 `BACKTESTING_EXTENDED_METRICS` 真正对用户可见（14 个报告字段从锁变成数值）；
+    // 导出那两个 key 判定能翻但界面没按钮，2026-11-26 起不再补。
+    assert!(BACKTEST_UNLOCK.contains("BACKTESTING_EXTENDED_METRICS"));
+    for k in [
+        "BACKTESTING_EXPORT_CSV",
+        "BACKTESTING_EXPORT_XLSX",
+        "BAR_DETALIZATION",
+        "SCRIPT_EXECUTION_ON_HISTORY_BARS",
+        "DEEP_HISTORY_BACKTEST",
+    ] {
+        assert!(
+            !BACKTEST_UNLOCK.contains(k),
+            "{k} 没有用户可见效果或由服务端强制，不能由客户端打开"
+        );
+    }
+    // 值必须是空对象：这是付费档在套餐表里的原样，不是"随手一个真值"
+    assert!(BACKTEST_UNLOCK.contains("if(!f[FE[j]])f[FE[j]]={}"));
+    // free 档没有 extends，getProductFeaturesConfig 返回的就是表本身
+    assert!(BACKTEST_UNLOCK.contains("getProductFeaturesConfig('free')"));
+    // 锚点不得与其他补丁重复（重复会让先打上的那条吃掉另一条的锚点）
+    for other in PATCHES.iter().filter(|q| q.name != p.name) {
+        assert_ne!(other.old, p.old, "回测增强锚点与 {} 重复", other.name);
+    }
+}
+
