@@ -15,12 +15,41 @@ pub(crate) fn now_secs() -> u64 {
 
 /// 记录"当前登录目标账号"（协议回调按它决定投给哪个实例）
 pub(crate) fn write_login_target(profile: &Profile) {
+    // 新一轮登录开始：把上一次的"已落地"标记撤掉，否则接管监听会立刻自我退出
+    clear_handoff_stop();
     let path = crate::install::tvx_root().join("login-target");
     let body = format!("{}\n{}\n", profile.dir.display(), now_secs());
     if let Err(e) = crate::install::write_atomic(&path, body.as_bytes()) {
         // 写不上只影响深链路由的纠偏，不该阻断启动；但要有痕迹可查
         crate::install::log_error("写登录目标 login-target", &e);
     }
+}
+
+/// 「这次登录已经落地」的标记文件。
+///
+/// 接管监听是个最长 600 秒的 PowerShell 轮询：只有"回调被别的进程抢走、token 躺在
+/// 它命令行里"这一种情况它才扫得到。而用户走浏览器授权 / 剪贴板投递成功时，回调
+/// 根本不经过进程命令行——脚本扫不到，只能一直空转到超时。用户看到的现象就是
+/// **登录已经完成，后台还挂着一个窗口/进程不走**。
+///
+/// 所以登录一旦落地（`route_auth` 投递成功），就写这个标记：脚本下一轮自行退出，
+/// 扫描线程也不再新起监听；下次 `write_login_target` 时自动撤掉。
+pub(crate) fn handoff_stop_path() -> PathBuf {
+    tvx_root().join("handoff-stop")
+}
+
+pub(crate) fn signal_handoff_done() {
+    let p = handoff_stop_path();
+    let _ = fs::write(&p, b"done\n");
+}
+
+pub(crate) fn clear_handoff_stop() {
+    let _ = fs::remove_file(handoff_stop_path());
+}
+
+/// 这次登录是否已经完成（完成后不再需要接管监听）
+pub(crate) fn handoff_done() -> bool {
+    handoff_stop_path().is_file()
 }
 
 /// 读登录目标：账号目录 + 写入时间。旧格式只有一行目录，时间按"现在"算。
@@ -66,30 +95,22 @@ pub fn clear_login_target() {
     let _ = fs::remove_file(crate::install::tvx_root().join("login-target"));
 }
 
-/// 维持 `tradingview://` 指向"正在登录的那个账号"。
+/// 维持 `tradingview://` 归助手接管（`tvhelper _auth "%1"`）。
 ///
 /// TradingView 每个实例启动时都会调 `setAsDefaultProtocolClient('tradingview')`，
-/// 把我们写好的协议命令**改回默认形态**（不带 --user-data-dir），导致浏览器回调
-/// 落回默认 profile、窗口里的账号换不掉。所以每轮扫描都检查一次，被改了就纠回来。
+/// 把注册表改成**它自己的完整命令行**（含 `--user-data-dir=<那个档案>`），
+/// 导致浏览器授权回调被直接投给"最后启动的那个档案"而不是正在登录的那个。
+/// 所以每轮扫描都检查一次，被改了就纠回来。
+///
+/// 这里只负责"归谁管"。投给哪个账号是 [`route_auth`] 的事，由 login-target 决定，
+/// 两件事不能混：早先这里要求 login-target 必须是 30 分钟内的、而且目标账号还在跑，
+/// 才肯纠偏。实测事故（2026-11-27）：一次不经过助手的启动（探针、桌面上的官方安装、
+/// 登录完成后的 relaunch）把注册表写成 `TradingView.exe --user-data-dir=%TEMP%\…`，
+/// 等用户半小时后再点登录时 login-target 早已过期，助手就不纠了 —— 浏览器回调落到
+/// 那个临时档案里，用户正在登录的账号一直拿不到 token，登录窗口原地转圈，
+/// 现象就是"登录后不是我选的那个账号"。
 #[cfg(not(target_os = "macos"))]
 pub fn maintain_protocol_handler() {
-    let Some((target, ts)) = read_login_target() else {
-        return;
-    };
-    // 过期的登录目标不再维持：否则几天后有个实例刚好叫这个名字且还开着，
-    // 协议命令就被重新指回来，用户手动改过的默认处理程序会被悄悄覆盖。
-    if now_secs().saturating_sub(ts) > LOGIN_TARGET_TTL_SECS {
-        return;
-    }
-    // 目标账号必须真的在跑，否则不维持（避免残留）
-    let alive = list()
-        .iter()
-        .find(|p| p.dir.display().to_string() == target)
-        .map(|p| running_pid(p).is_some())
-        .unwrap_or(false);
-    if !alive {
-        return;
-    }
     let Some(managed) = crate::install::load_managed() else {
         return;
     };
@@ -259,17 +280,22 @@ pub fn route_auth(url: &str) {
     }
 
     auth_log(&format!("  转发给 {}", p.name));
-    if let Ok(child) = Command::new(&exe)
+    let forwarded = Command::new(&exe)
         .arg(format!("--user-data-dir={}", p.dir.display()))
         .arg(url)
         .env_remove("ELECTRON_RUN_AS_NODE")
         .env_remove("ELECTRON_NO_ATTACH_CONSOLE")
         .env_remove("ELECTRON_ENABLE_LOGGING")
         .env_remove("NODE_OPTIONS")
-        .spawn()
-    {
-        // 记下 pid：接管脚本要跳过它，别把我们正在用的实例当成"被抢的回调"杀掉
-        record_spawned(child.id());
+        .spawn();
+    match forwarded {
+        Ok(child) => {
+            // 记下 pid：接管脚本要跳过它，别把我们正在用的实例当成"被抢的回调"杀掉
+            record_spawned(child.id());
+            // 回调已经送到目标实例：接管监听可以收工了（见 handoff_stop_path 的注释）
+            signal_handoff_done();
+        }
+        Err(e) => crate::install::log_error("转发授权回调", &e),
     }
 }
 
@@ -343,17 +369,17 @@ pub(crate) fn record_spawned(pid: u32) {
     }
 }
 
-#[cfg(windows)]
-pub(crate) fn capture_handoff(secs: u32) -> Option<(u32, String)> {
-    use std::io::Write;
-
-    let skip_path = handoff_skip_path();
-    let script = format!(
+/// 接管脚本正文。抽成独立函数是为了能对"必须包含的判据"做单元测试——
+/// 这段脚本是字符串拼进 PowerShell 的，写错了没有编译期保护。
+pub(crate) fn handoff_script(secs: u32) -> String {
+    format!(
         r#"$skip=@()
 $sf=if($args.Count -gt 0){{ $args[0] }}else{{ '' }}
+$stop=if($args.Count -gt 1){{ $args[1] }}else{{ '' }}
 if($sf -and (Test-Path $sf)){{ $skip=@(Get-Content $sf | Where-Object {{ $_ -match '^[0-9]+$' }} | ForEach-Object {{ [int]$_ }}) }}
 $deadline=(Get-Date).AddSeconds({secs})
 while((Get-Date) -lt $deadline){{
+  if($stop -and (Test-Path $stop)){{ break }}
   $p = Get-CimInstance Win32_Process -Filter "Name='TradingView.exe'" |
        Where-Object {{ $_.CommandLine -like '*tradingview://browser-auth*' -and ($skip -notcontains $_.ProcessId) }} |
        Select-Object -First 1
@@ -361,10 +387,18 @@ while((Get-Date) -lt $deadline){{
     $c=$p.CommandLine; $i=$c.IndexOf('tradingview://')
     if($i -ge 0){{ Write-Output ($p.ProcessId.ToString() + '|' + $c.Substring($i).Trim('"')) ; break }}
   }}
-  Start-Sleep -Milliseconds 1200
+  Start-Sleep -Milliseconds 2000
 }}
 "#
-    );
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn capture_handoff(secs: u32) -> Option<(u32, String)> {
+    use std::io::Write;
+
+    let skip_path = handoff_skip_path();
+    let script = handoff_script(secs);
 
     let root = crate::install::tvx_root();
     let _ = fs::create_dir_all(&root);
@@ -373,6 +407,10 @@ while((Get-Date) -lt $deadline){{
     f.write_all(script.as_bytes()).ok()?;
     drop(f);
 
+    // `-WindowStyle Hidden` 只让 PowerShell 自己隐藏窗口，**挡不住 Windows 给
+    // 无控制台的 GUI 父进程新建的那个 conhost 窗口**：实测（2026-11-27）登录完成后
+    // 有一个 powershell.exe + conhost.exe 一直挂在桌面上，跑满 600 秒才消失。
+    // 真正的开关是 CREATE_NO_WINDOW——子进程压根不分配控制台。
     let out = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -385,6 +423,8 @@ while((Get-Date) -lt $deadline){{
         ])
         .arg(&tmp)
         .arg(&skip_path)
+        .arg(handoff_stop_path())
+        .creation_flags(CREATE_NO_WINDOW)
         .env_remove("ELECTRON_RUN_AS_NODE")
         .output()
         .ok()?;
@@ -465,16 +505,115 @@ pub(crate) fn is_managed_instance(pid: u32) -> bool {
     list().into_iter().any(|p| running_pid(&p) == Some(pid))
 }
 
+/// 把授权 deeplink 放进剪贴板。
+///
+/// 这是官方自带的投递通道，源码里写得很直白：
+/// `AuthenticationHandler.tryObtainTokenFromClipboard()` 在「等待 token」阶段会
+/// `parseDeeplink((await clipboard.readText()).trim())`，解析成功就
+/// `dispatchDeepLink(...)` 自己完成登录；而且登录对话框每次获得焦点都会读一次
+/// （`welcomeDialogWindow.windowRef.on("focus", …)`），用户切回窗口立刻生效。
+///
+/// 为什么需要它：装了 Microsoft Store 版（MSIX）的机器上，`tradingview://` 由
+/// AppX 声明并抢占，改注册表改不动（实测 2026-11-27：回调被拉起的是 WindowsApps
+/// 里的官方版，token 落进它自己的账号）。把 token 直接塞剪贴板，就绕开了协议这一层，
+/// 不依赖用户装的是哪个版本。副作用是会占掉用户当前剪贴板内容。
+#[cfg(windows)]
+pub(crate) fn deliver_via_clipboard(url: &str) -> bool {
+    let escaped = url.replace('\'', "''");
+    Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+        ])
+        .arg(format!("Set-Clipboard -Value '{escaped}'"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn deliver_via_clipboard(url: &str) -> bool {
+    use std::io::Write;
+    let Ok(mut c) = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(si) = c.stdin.as_mut() {
+        let _ = si.write_all(url.as_bytes());
+    }
+    c.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub(crate) fn deliver_via_clipboard(url: &str) -> bool {
+    use std::io::Write;
+    for tool in ["wl-copy", "xclip", "xsel"] {
+        let mut cmd = Command::new(tool);
+        match tool {
+            "xclip" => {
+                cmd.args(["-selection", "clipboard"]);
+            }
+            "xsel" => {
+                cmd.args(["--clipboard", "--input"]);
+            }
+            _ => {}
+        }
+        let Ok(mut c) = cmd.stdin(std::process::Stdio::piped()).spawn() else {
+            continue;
+        };
+        if let Some(si) = c.stdin.as_mut() {
+            let _ = si.write_all(url.as_bytes());
+        }
+        if c.wait().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 最近 `secs` 秒内有没有"启动账号"的动作（`launch` 会写 login-target）。
+///
+/// 用来界定"登录窗口期"：只有这段时间才值得开接管监听。平时不开，是因为监听要
+/// 每 2 秒查一次进程列表（PowerShell 轮询），没必要常驻。
+pub(crate) fn login_started_within(secs: u64) -> bool {
+    read_login_target()
+        .map(|(_, ts)| now_secs().saturating_sub(ts) <= secs)
+        .unwrap_or(false)
+}
+
+/// 一次监听跑多久（秒）。扫描线程每 2 秒会调 [`spawn_handoff_watcher`] 续期，
+/// 单例锁保证不会叠加。取 600 是让"续期空窗"摊薄到 0.3% 左右：
+/// 窗口太短会在用户点授权的那一两秒里恰好断档。
+pub(crate) const HANDOFF_LISTEN_SECS: u32 = 600;
+
 /// 登录期间调用：抓一次被抢走的回调并转发给我们的实例。
 pub fn spawn_handoff_watcher(ctx: eframe::egui::Context) {
     use std::sync::atomic::Ordering;
+    // 这次登录已经落地：不再起监听，免得登录完了后台还挂个空的轮询进程
+    if handoff_done() {
+        return;
+    }
     if HANDOFF_WATCHING.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(move || {
-        if let Some((pid, url)) = capture_handoff(90) {
+        if let Some((pid, url)) = capture_handoff(HANDOFF_LISTEN_SECS) {
+            // 两条路一起走，因为不同机器上只有一条通：
+            // - 助手路由（起一个带 url 的进程）：协议归我们时最直接，token 直接进目标实例；
+            // - 剪贴板：商店版/官方安装抢了协议的机器上，这是唯一不依赖协议的通道，
+            //   官方自己在「等待 token」阶段会读剪贴板（见 deliver_via_clipboard 的注释）。
+            let via_clip = deliver_via_clipboard(&url);
             route_auth(&url);
-            auth_log(&format!("已接管被抢走的授权回调（PID {pid}）"));
+            auth_log(&format!(
+                "已接管被抢走的授权回调（PID {pid}，剪贴板投递{}）",
+                if via_clip { "成功" } else { "失败" }
+            ));
             if pid != 0 {
                 if is_managed_instance(pid) {
                     auth_log("  该进程是我们正在用的实例，只转发不结束");
@@ -492,8 +631,12 @@ pub fn spawn_handoff_watcher(ctx: eframe::egui::Context) {
 pub fn capture_handoff_once(secs: u32) -> Option<(u32, String)> {
     let got = capture_handoff(secs);
     if let Some((pid, url)) = &got {
+        let via_clip = deliver_via_clipboard(url);
         route_auth(url);
-        auth_log(&format!("手动接管回调（PID {pid}）"));
+        auth_log(&format!(
+            "手动接管回调（PID {pid}，剪贴板投递{}）",
+            if via_clip { "成功" } else { "失败" }
+        ));
         if *pid != 0 && !is_managed_instance(*pid) {
             let _ = stop(*pid);
         }

@@ -144,6 +144,9 @@ pub(crate) fn open_auth_urls_if_new(ctx: Option<&egui::Context>) -> Option<Strin
 
     // 同时盯住被商店版抢走的回调（token 卡在那个进程的命令行里）
     if let Some(c) = ctx {
+        // 新一轮登录开始：撤掉上一次的"已落地"标记，否则监听一起来就自我退出，
+        // 用户第二次登录就没有兜底了
+        profiles::clear_handoff_stop();
         profiles::spawn_handoff_watcher(c.clone());
     }
     let lang = crate::install::load_config().lang;

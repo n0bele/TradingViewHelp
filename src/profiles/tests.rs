@@ -51,10 +51,34 @@ fn duplicate_auth_callback_is_ignored() {
     assert!(!auth_duplicate("tradingview://dedup-test/?token=t2", 10_022));
 }
 
+/// 接管脚本必须能"提前收工"。
+///
+/// 事故（2026-11-27）：登录已经完成，桌面上还挂着一个 powershell + conhost 窗口，
+/// 要等满 600 秒才消失。原因有两个：脚本只有超时一条出口、启动时没加
+/// CREATE_NO_WINDOW。前者在这里锁住（后者无法静态测，见 capture_handoff 的注释）。
+#[test]
+fn handoff_script_can_exit_early() {
+    let js = handoff_script(600);
+    assert!(
+        js.contains("$stop=if($args.Count -gt 1)"),
+        "脚本要接收「登录已落地」标记路径"
+    );
+    assert!(
+        js.contains("if($stop -and (Test-Path $stop)){ break }"),
+        "标记存在时必须跳出轮询，而不是空转到超时"
+    );
+    assert!(
+        js.contains("AddSeconds(600)"),
+        "超时仍按参数走，别写死"
+    );
+    // 原有判据不能被改坏：只认带 browser-auth 的命令行，且跳过自己 spawn 的 pid
+    assert!(js.contains("browser-auth"));
+    assert!(js.contains("$skip -notcontains"));
+}
+
 /// 目标文件格式：第一行目录，第二行写入时间（旧格式只有一行，按"现在"算）
 #[test]
-fn login_target_format_roundtrip() {
-    let body = format!("{}\n{}\n", "/x", 1234u64);
+fn login_target_format_roundtrip() {    let body = format!("{}\n{}\n", "/x", 1234u64);
     let mut lines = body.lines();
     assert_eq!(lines.next(), Some("/x"));
     assert_eq!(lines.next().and_then(|s| s.parse::<u64>().ok()), Some(1234));

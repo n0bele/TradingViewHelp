@@ -17,6 +17,13 @@ pub(crate) const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// 「全部启动」时相邻实例的间隔（秒）
 pub(crate) const STAGGER_SECS: u64 = 3;
 
+/// 账号启动后多久内保持"接管浏览器回调"的监听（秒）。
+///
+/// 覆盖「启动 → 点登录 → 浏览器里输入账号密码/二次验证 → 授权完成」这一段。
+/// 再长就没意义了：超过这个时间用户要么已经登录完，要么去干别的了，
+/// 而监听要每 1.2 秒查一次进程列表，没必要一直开着。
+const HANDOFF_WINDOW_SECS: u64 = 15 * 60;
+
 #[derive(Default)]
 pub(crate) struct Shared {
     pub(crate) log: Vec<String>,
@@ -46,6 +53,17 @@ pub(crate) fn scan_now(ctx: Option<&egui::Context>) -> Scan {
     let status = profiles::status_snapshot(&profiles);
     // 应用自己会改写 tradingview:// 协议命令，这里每轮纠回来
     profiles::maintain_protocol_handler();
+    // 登录兜底接管：装了 Microsoft Store 版（MSIX）或官方安装版的机器上，
+    // `tradingview://` 回调会被它们抢走 —— AppX 声明的协议优先级高于 HKCU 注册，
+    // 注册表改成什么都不管用（实测 2026-11-27：回调被拉起的是 WindowsApps 里的
+    // 官方版，token 落进它自己的账号）。所以这里在"刚启动过账号"的窗口期内
+    // 保一个监听：谁被系统拉起来，就从谁的命令行里把 token 捞回来。
+    // 监听自身有单例锁、每轮 90 秒，由这里每 2 秒续期。
+    if let Some(c) = ctx {
+        if profiles::login_started_within(HANDOFF_WINDOW_SECS) {
+            profiles::spawn_handoff_watcher(c.clone());
+        }
+    }
     let auth_note = open_auth_urls_if_new(ctx);
     let mut log = Vec::new();
     if let Some(note) = auth_note {
