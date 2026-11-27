@@ -248,7 +248,9 @@ fn copy_tree(
         if ft.is_dir() {
             copy_tree(&src, &dst, n, lang, log)?;
         } else if ft.is_file() {
-            fs::copy(&src, &dst).with_context(|| format!("复制 {}", src.display()))?;
+            // 不用 fs::copy：它会把源文件的 EFS 加密属性一起搬过去，
+            // 碰上目标位置加不了密就报 os error 6000，见 install::copy_file
+            copy_file(&src, &dst).with_context(|| format!("复制 {}", src.display()))?;
             *n += 1;
             if *n % 40 == 0 {
                 log(lang.b_progress(*n));

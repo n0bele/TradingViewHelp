@@ -101,7 +101,8 @@ fn walk(
         }
 
         if is_unpacked {
-            fs::copy(unpacked.join(&crel), &dest)
+            // 同样避开 fs::copy 的属性继承（EFS 属性 → os error 6000）
+            crate::install::copy_file(&unpacked.join(&crel), &dest)
                 .with_context(|| format!("复制 unpacked 文件 {}", crel.display()))?;
         } else {
             let off: u64 = child

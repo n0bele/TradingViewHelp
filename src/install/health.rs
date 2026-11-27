@@ -228,6 +228,39 @@ pub fn doctor_report() -> String {
             if p.dir.is_dir() { "存在" } else { "不存在" }
         ));
     }
+    // 装在哪、最后会选哪一份 —— 用户报"没有副本 / 版本不对"时，这一节就是答案
+    let installs = discover::discover();
+    let chosen = preferred_index(&installs);
+    match chosen {
+        Some(_) => s.push_str(&format!(
+            "安装来源: {} 个（默认选第 {} 个）\n",
+            installs.len(),
+            chosen.unwrap() + 1
+        )),
+        None => s.push_str("安装来源: 没找到（需要装过 TradingView，或用「添加」指定目录）\n"),
+    }
+    for (i, inst) in installs.iter().enumerate() {
+        // 占位版本（portable / custom）没有信息量，别占着位置冒充版本号
+        let ver = if ver_key(&inst.version).iter().any(|&n| n > 0) {
+            format!(" {}", inst.version)
+        } else {
+            String::new()
+        };
+        s.push_str(&format!(
+            "  {} [{}] {}{} -> {}\n",
+            if Some(i) == chosen { "*" } else { " " },
+            if patch::is_verified(&inst.version) { "已验证" } else { "未验证" },
+            match inst.kind {
+                InstallKind::Store => "商店",
+                InstallKind::Portable => "本地安装",
+                InstallKind::App => "App",
+                InstallKind::Custom => "手动指定",
+            },
+            ver,
+            inst.root.display()
+        ));
+    }
+
     match load_managed() {
         Some(m) => {
             s.push_str(&format!("副本版本: {}\n", m.version));

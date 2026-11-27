@@ -920,11 +920,26 @@ fn adblock_regex_blocks_promo_feed_only() {
     let js = dir.join("corpus.js");
     fs::write(&js, ADBLOCK_CORPUS_JS).unwrap();
 
-    let out = std::process::Command::new("node")
-        .arg(&js)
-        .arg(body)
-        .output()
-        .expect("node 启动失败");
+    // 子进程根本没跑起来时 stdout/stderr 全空 —— 那不是"拦错了"，常见原因是父进程
+    // 环境里的 NODE_OPTIONS / ELECTRON_RUN_AS_NODE 被它继承（沙箱、CI、装过 node 的
+    // 开发机都有），node 起手就退出。脚本每条分支都 console.log，所以**真失败一定带
+    // 输出**：只在"零输出"时重跑，绝不放过真的误拦/漏拦。
+    let mut last: Option<std::process::Output> = None;
+    for _ in 0..3 {
+        let out = std::process::Command::new("node")
+            .arg(&js)
+            .arg(body)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("ELECTRON_RUN_AS_NODE")
+            .output()
+            .expect("node 启动失败");
+        let quiet = out.stdout.is_empty() && out.stderr.is_empty();
+        last = Some(out);
+        if !quiet {
+            break;
+        }
+    }
+    let out = last.expect("至少跑过一次 node");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "误拦/漏拦：\n{stdout}\n{stderr}");
